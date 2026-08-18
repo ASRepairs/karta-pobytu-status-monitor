@@ -52,6 +52,7 @@ function isNetworkError(error) {
 
 async function resolveCandidateIpv4s(hostname) {
   const addresses = new Set();
+
   try {
     for (const address of await dns.resolve4(hostname)) addresses.add(address);
   } catch (error) {
@@ -72,6 +73,7 @@ async function resolveCandidateIpv4s(hostname) {
   } catch (error) {
     console.log(`Public DNS fallback failed: ${error.message}`);
   }
+
   return [...addresses];
 }
 
@@ -92,13 +94,10 @@ function launchOptions(forcedIpv4 = null) {
 
 async function createPage(forcedIpv4 = null) {
   const browser = await chromium.launch(launchOptions(forcedIpv4));
-  const context = await browser.newContext({
-    locale: 'pl-PL',
-    timezoneId: 'Europe/Warsaw',
-  });
+  const context = await browser.newContext({ locale: 'pl-PL', timezoneId: 'Europe/Warsaw' });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
-  return { browser, context, page };
+  return { browser, page };
 }
 
 async function gotoWithRetry(page, url, attempts = 3) {
@@ -134,22 +133,19 @@ async function openPortalSession() {
     }
   }
 
-  const proxyHint = PROXY_SERVER
+  const hint = PROXY_SERVER
     ? 'The configured relay/proxy also could not reach the portal.'
     : 'No usable route to Przybysz was available.';
-  throw new Error(`Could not connect to ${PORTAL_HOST}. ${proxyHint}\nLast error: ${lastError?.message || lastError}`);
+  throw new Error(`Could not connect to ${PORTAL_HOST}. ${hint}\nLast error: ${lastError?.message || lastError}`);
 }
 
 async function firstVisible(scope, selectors) {
   for (const selector of selectors) {
     const locator = scope.locator(selector).first();
-    if (await locator.count()) {
-      try {
-        if (await locator.isVisible({ timeout: 700 })) return locator;
-      } catch {
-        // Try the next selector.
-      }
-    }
+    if (!(await locator.count())) continue;
+    try {
+      if (await locator.isVisible({ timeout: 700 })) return locator;
+    } catch {}
   }
   return null;
 }
@@ -182,12 +178,10 @@ async function findLoginForm(page) {
     const passwordInput = await firstVisible(frame, PASSWORD_SELECTORS);
     if (!passwordInput) continue;
 
-    let loginInput = await firstVisible(frame, LOGIN_SELECTORS);
-    if (!loginInput) {
-      loginInput = await firstVisible(frame, [
-        'input:not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])',
-      ]);
-    }
+    const loginInput = await firstVisible(frame, [
+      ...LOGIN_SELECTORS,
+      'input:not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])',
+    ]);
     if (loginInput) return { frame, loginInput, passwordInput };
   }
   return null;
@@ -207,9 +201,7 @@ async function clickLoginEntryPoint(page) {
         await page.waitForTimeout(1200);
         return true;
       }
-    } catch {
-      // Try another entry point.
-    }
+    } catch {}
   }
   return false;
 }
@@ -218,9 +210,7 @@ async function safePublicPageDiagnostics(page) {
   let title = '';
   let bodyPreview = '';
   try { title = await page.title(); } catch {}
-  try {
-    bodyPreview = normalizeText(await page.locator('body').innerText()).slice(0, 700);
-  } catch {}
+  try { bodyPreview = normalizeText(await page.locator('body').innerText()).slice(0, 700); } catch {}
 
   const frameInfo = [];
   for (const frame of page.frames()) {
@@ -276,8 +266,8 @@ async function fillLogin(page) {
 
   let submit = form.frame.getByRole('button', { name: /zaloguj|login|sign in/i }).first();
   if (!(await submit.count())) submit = form.frame.locator('button[type="submit"], input[type="submit"]').first();
-  if (!(await submit.count())) await form.passwordInput.press('Enter');
-  else await submit.click();
+  if (await submit.count()) await submit.click();
+  else await form.passwordInput.press('Enter');
 
   await page.waitForTimeout(1800);
 }
@@ -288,6 +278,7 @@ async function openAcceptedApplications(page) {
     page.getByRole('button', { name: /wnioski\s+przyjęte/i }).first(),
     page.getByText(/wnioski\s+przyjęte/i, { exact: false }).first(),
   ];
+
   for (const candidate of navCandidates) {
     try {
       if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
@@ -304,7 +295,8 @@ async function openAcceptedApplications(page) {
     try {
       await gotoWithRetry(page, `${BASE_URL}${route}`, 1);
       await page.waitForTimeout(1000);
-      if (!/\/login(?:$|[/?#])/.test(new URL(page.url()).pathname + new URL(page.url()).search)) return;
+      const currentUrl = new URL(page.url());
+      if (!/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) return;
     } catch (error) {
       lastError = error;
     }
@@ -312,42 +304,77 @@ async function openAcceptedApplications(page) {
   if (lastError) throw lastError;
 }
 
-const STATUS_LABEL_PATTERN = /^(etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)\b/i;
-const STATUS_LINE_PATTERN = /^(?<label>etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)\s*[:\-–—]?\s*(?<value>.*)$/i;
-const NEXT_FIELD_PATTERN = /\s+(?:sprawę\s+prowadzi|osoba\s+prowadząca|data\s+przyjęcia|data\s+złożenia|nr\.?\s*pio|numer\s+pio|pio|rodzaj\s+wniosku|typ\s+wniosku)\s*[:\-–—]?/i;
-const OTHER_FIELD_LINE_PATTERN = /^(?:sprawę\s+prowadzi|osoba\s+prowadząca|data\s+przyjęcia|data\s+złożenia|nr\.?\s*pio|numer\s+pio|pio|rodzaj\s+wniosku|typ\s+wniosku)\b/i;
+const STATUS_FIELD_SOURCE = 'etap\\s+realizacji|status(?:\\s+sprawy)?|etap\\s+sprawy|stan\\s+sprawy';
+const FOLLOWING_FIELD_SOURCE = [
+  'sprawę\\s+prowadzi',
+  'osoba\\s+prowadząca',
+  'data\\s+przyjęcia(?:\\s+wniosku)?',
+  'data\\s+złożenia(?:\\s+wniosku)?',
+  'nr\\.?\\s*pio',
+  'numer\\s+(?:wniosku|pio)',
+  'rodzaj\\s+wniosku',
+  'typ\\s+wniosku',
+  'podgląd\\s+wniosku',
+  'komunikaty',
+].join('|');
+
+const STATUS_LABEL_PATTERN = new RegExp(`^(?:${STATUS_FIELD_SOURCE})\\b`, 'i');
+const STATUS_LINE_PATTERN = new RegExp(`^(?<label>${STATUS_FIELD_SOURCE})\\s*[:\\-–—]?\\s*(?<value>.*)$`, 'i');
+const NEXT_FIELD_PATTERN = new RegExp(`\\s+(?:${FOLLOWING_FIELD_SOURCE})\\s*[:\\-–—]?`, 'i');
+const OTHER_FIELD_LINE_PATTERN = new RegExp(`^(?:${FOLLOWING_FIELD_SOURCE})\\b`, 'i');
+const INLINE_STATUS_PATTERN = new RegExp(
+  `(?:^|\\s)(?<label>${STATUS_FIELD_SOURCE})\\s*[:\\-–—]?\\s*(?<value>.+?)(?=\\s+(?:${FOLLOWING_FIELD_SOURCE})\\s*[:\\-–—]?|$)`,
+  'i',
+);
 
 function cleanStatusValue(value) {
-  let cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+  let cleaned = String(value || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
   const nextField = cleaned.search(NEXT_FIELD_PATTERN);
   if (nextField > 0) cleaned = cleaned.slice(0, nextField).trim();
   return cleaned.replace(/^[:\-–—\s]+/, '').trim();
 }
 
-function extractStatusFromText(text) {
-  const lines = normalizeText(text).split('\n');
+function validExtractedStatus(field, value) {
+  const cleaned = cleanStatusValue(value);
+  if (!cleaned || cleaned.length > 1000 || STATUS_LABEL_PATTERN.test(cleaned)) return null;
+  return { field: field.replace(/\s+/g, ' ').trim(), value: cleaned };
+}
 
+function extractStatusFromText(text) {
+  const normalized = normalizeText(text);
+  const lines = normalized.split('\n');
+
+  // Handle the conventional representation where the label begins a line and
+  // the value is either on that line or in one or more following grid cells.
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    const match = line.match(STATUS_LINE_PATTERN);
+    const match = lines[i].match(STATUS_LINE_PATTERN);
     if (!match?.groups) continue;
 
-    const field = match.groups.label.replace(/\s+/g, ' ').trim();
     let value = cleanStatusValue(match.groups.value);
-
     if (!value) {
-      for (let j = i + 1; j < Math.min(lines.length, i + 4); j += 1) {
+      const collected = [];
+      for (let j = i + 1; j < Math.min(lines.length, i + 6); j += 1) {
         const candidate = lines[j].trim();
         if (!candidate) continue;
         if (STATUS_LABEL_PATTERN.test(candidate) || OTHER_FIELD_LINE_PATTERN.test(candidate)) break;
-        value = cleanStatusValue(candidate);
-        if (value) break;
+        collected.push(candidate);
       }
+      value = cleanStatusValue(collected.join(' '));
     }
 
-    if (value && value.length <= 1000 && !STATUS_LABEL_PATTERN.test(value)) {
-      return { field, value };
-    }
+    const result = validExtractedStatus(match.groups.label, value);
+    if (result) return result;
+  }
+
+  // Przybysz renders the application summary as a responsive grid. In some
+  // viewport/DOM combinations innerText flattens several label/value cells onto
+  // one line: "... Etap realizacji: VALUE Sprawę prowadzi: ...". Search that
+  // representation too and stop strictly at the next known field label.
+  const flat = normalized.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  const inline = flat.match(INLINE_STATUS_PATTERN);
+  if (inline?.groups) {
+    const result = validExtractedStatus(inline.groups.label, inline.groups.value);
+    if (result) return result;
   }
 
   return null;
@@ -358,20 +385,25 @@ async function extractStrictStatus(page) {
   const exactPioFound = (await pio.count()) > 0;
 
   if (exactPioFound) {
+    // Start at the exact PIO value and walk outward. The first ancestor that
+    // contains both the PIO and an explicit status is the safest representation
+    // of this application card, even when multiple applications exist.
     let current = pio;
-    for (let depth = 0; depth < 10; depth += 1) {
+    for (let depth = 0; depth < 14; depth += 1) {
       let text = '';
       try { text = normalizeText(await current.innerText()); } catch {}
 
-      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 12000) {
+      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 30000) {
         const status = extractStatusFromText(text);
-        if (status) return { ...status, caseText: text, pioMatchedExactly: true };
+        if (status) return { ...status, pioMatchedExactly: true };
       }
 
       current = current.locator('..');
     }
   }
 
+  // Fallback for portals that split the PIO into nested spans. Keep extraction
+  // bounded around the configured PIO instead of accepting any account status.
   const bodyText = normalizeText(await page.locator('body').innerText());
   if (!bodyText.includes(PIO_NUMBER)) {
     throw new Error('The configured PIO number was not found after login. Refusing to create a baseline.');
@@ -379,18 +411,22 @@ async function extractStrictStatus(page) {
 
   const lines = bodyText.split('\n');
   const index = lines.findIndex((line) => line.includes(PIO_NUMBER));
-  const windowText = lines
-    .slice(Math.max(0, index - 12), Math.min(lines.length, index + 36))
-    .join('\n');
-  const status = extractStatusFromText(windowText);
+  let windowText;
+  if (lines.length === 1) {
+    const flatIndex = bodyText.indexOf(PIO_NUMBER);
+    windowText = bodyText.slice(Math.max(0, flatIndex - 1500), Math.min(bodyText.length, flatIndex + 3500));
+  } else {
+    windowText = lines.slice(Math.max(0, index - 12), Math.min(lines.length, index + 36)).join('\n');
+  }
 
+  const status = extractStatusFromText(windowText);
   if (!status) {
     throw new Error(
       'The case was found, but no explicit status/stage field (for example "Etap realizacji" or "Status sprawy") could be identified. Refusing to save a false baseline.',
     );
   }
 
-  return { ...status, caseText: windowText, pioMatchedExactly: false };
+  return { ...status, pioMatchedExactly: false };
 }
 
 function readPreviousStatusFingerprint() {
@@ -475,6 +511,7 @@ try {
 
   console.log('Case found: yes');
   console.log('PIO matched: yes');
+  console.log(`PIO matched exactly: ${pioMatchedExactly ? 'yes' : 'no'}`);
   console.log('Status field found: yes');
   console.log(`Status field: ${statusField}`);
   console.log('Status fingerprint saved: yes');
