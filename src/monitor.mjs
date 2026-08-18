@@ -47,7 +47,9 @@ function fingerprintStatus(value) {
 
 function isNetworkError(error) {
   const text = String(error?.message || error);
-  return /ERR_(CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_CLOSED|TIMED_OUT|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|PROXY_CONNECTION_FAILED)/i.test(text);
+  return error?.name === 'TimeoutError'
+    || /Timeout\s+\d+ms\s+exceeded/i.test(text)
+    || /ERR_(CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_CLOSED|TIMED_OUT|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|PROXY_CONNECTION_FAILED)/i.test(text);
 }
 
 async function resolveCandidateIpv4s(hostname) {
@@ -100,16 +102,19 @@ async function createPage(forcedIpv4 = null) {
   return { browser, page };
 }
 
-async function gotoWithRetry(page, url, attempts = 3) {
+async function gotoWithRetry(page, url, attempts = PROXY_SERVER ? 4 : 3) {
   let lastError;
+  const navigationTimeout = PROXY_SERVER ? 60000 : 45000;
+
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      return await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      return await page.goto(url, { waitUntil: 'domcontentloaded', timeout: navigationTimeout });
     } catch (error) {
       lastError = error;
       if (!isNetworkError(error) || attempt === attempts) throw error;
-      console.log(`Portal connection attempt ${attempt}/${attempts} failed; retrying…`);
-      await page.waitForTimeout(attempt * 1500);
+      console.log(`Portal navigation attempt ${attempt}/${attempts} timed out or failed transiently; retrying…`);
+      try { await page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 }); } catch {}
+      await page.waitForTimeout(Math.min(6000, attempt * 2000));
     }
   }
   throw lastError;
@@ -134,7 +139,7 @@ async function openPortalSession() {
   }
 
   const hint = PROXY_SERVER
-    ? 'The configured relay/proxy also could not reach the portal.'
+    ? 'The configured relay/proxy also could not reach the portal reliably.'
     : 'No usable route to Przybysz was available.';
   throw new Error(`Could not connect to ${PORTAL_HOST}. ${hint}\nLast error: ${lastError?.message || lastError}`);
 }
