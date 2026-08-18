@@ -26,6 +26,8 @@ fs.mkdirSync(STATE_DIR, { recursive: true });
 
 function normalizeText(value) {
   return String(value || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\u00A0\u202F]/g, ' ')
     .replace(/\r/g, '')
     .split('\n')
     .map((line) => line.replace(/\s+/g, ' ').trim())
@@ -35,7 +37,6 @@ function normalizeText(value) {
 
 function normalizeComparableStatus(value) {
   return normalizeText(value)
-    .replace(/[\u00a0\u202f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLocaleLowerCase('pl-PL');
@@ -96,7 +97,11 @@ function launchOptions(forcedIpv4 = null) {
 
 async function createPage(forcedIpv4 = null) {
   const browser = await chromium.launch(launchOptions(forcedIpv4));
-  const context = await browser.newContext({ locale: 'pl-PL', timezoneId: 'Europe/Warsaw' });
+  const context = await browser.newContext({
+    locale: 'pl-PL',
+    timezoneId: 'Europe/Warsaw',
+    viewport: { width: 1280, height: 1200 },
+  });
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   return { browser, page };
@@ -288,7 +293,7 @@ async function openAcceptedApplications(page) {
     try {
       if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
         await candidate.click();
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(1200);
         return;
       }
     } catch {}
@@ -299,7 +304,7 @@ async function openAcceptedApplications(page) {
   for (const route of paths) {
     try {
       await gotoWithRetry(page, `${BASE_URL}${route}`, 1);
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(800);
       const currentUrl = new URL(page.url());
       if (!/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) return;
     } catch (error) {
@@ -331,9 +336,11 @@ const INLINE_STATUS_PATTERN = new RegExp(
   `(?:^|\\s)(?<label>${STATUS_FIELD_SOURCE})\\s*[:\\-–—]?\\s*(?<value>.+?)(?=\\s+(?:${FOLLOWING_FIELD_SOURCE})\\s*[:\\-–—]?|$)`,
   'i',
 );
+const STATUS_LABEL_EXACT = /^(?:etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)\s*:?[\s]*$/i;
+const STATUS_LABEL_ANYWHERE = /(?:etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)/i;
 
 function cleanStatusValue(value) {
-  let cleaned = String(value || '').replace(/[\u00a0\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+  let cleaned = normalizeText(value).replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
   const nextField = cleaned.search(NEXT_FIELD_PATTERN);
   if (nextField > 0) cleaned = cleaned.slice(0, nextField).trim();
   return cleaned.replace(/^[:\-–—\s]+/, '').trim();
@@ -341,16 +348,14 @@ function cleanStatusValue(value) {
 
 function validExtractedStatus(field, value) {
   const cleaned = cleanStatusValue(value);
-  if (!cleaned || cleaned.length > 1000 || STATUS_LABEL_PATTERN.test(cleaned)) return null;
-  return { field: field.replace(/\s+/g, ' ').trim(), value: cleaned };
+  if (!cleaned || cleaned.length > 1000 || STATUS_LABEL_PATTERN.test(cleaned) || OTHER_FIELD_LINE_PATTERN.test(cleaned)) return null;
+  return { field: normalizeText(field).replace(/\n/g, ' '), value: cleaned };
 }
 
 function extractStatusFromText(text) {
   const normalized = normalizeText(text);
   const lines = normalized.split('\n');
 
-  // Handle the conventional representation where the label begins a line and
-  // the value is either on that line or in one or more following grid cells.
   for (let i = 0; i < lines.length; i += 1) {
     const match = lines[i].match(STATUS_LINE_PATTERN);
     if (!match?.groups) continue;
@@ -358,7 +363,7 @@ function extractStatusFromText(text) {
     let value = cleanStatusValue(match.groups.value);
     if (!value) {
       const collected = [];
-      for (let j = i + 1; j < Math.min(lines.length, i + 6); j += 1) {
+      for (let j = i + 1; j < Math.min(lines.length, i + 7); j += 1) {
         const candidate = lines[j].trim();
         if (!candidate) continue;
         if (STATUS_LABEL_PATTERN.test(candidate) || OTHER_FIELD_LINE_PATTERN.test(candidate)) break;
@@ -371,10 +376,6 @@ function extractStatusFromText(text) {
     if (result) return result;
   }
 
-  // Przybysz renders the application summary as a responsive grid. In some
-  // viewport/DOM combinations innerText flattens several label/value cells onto
-  // one line: "... Etap realizacji: VALUE Sprawę prowadzi: ...". Search that
-  // representation too and stop strictly at the next known field label.
   const flat = normalized.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
   const inline = flat.match(INLINE_STATUS_PATTERN);
   if (inline?.groups) {
@@ -385,53 +386,149 @@ function extractStatusFromText(text) {
   return null;
 }
 
+async function extractStatusFromDom(scope) {
+  const labels = scope.getByText(STATUS_LABEL_EXACT);
+  const count = Math.min(await labels.count(), 20);
+
+  for (let i = 0; i < count; i += 1) {
+    const label = labels.nth(i);
+    let visible = false;
+    try { visible = await label.isVisible({ timeout: 300 }); } catch {}
+    if (!visible) continue;
+
+    const data = await label.evaluate((node) => {
+      const clean = (value) => String(value || '')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .replace(/[\u00A0\u202F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const contexts = [];
+      const values = [];
+      let current = node;
+
+      for (let depth = 0; current && depth < 6; depth += 1) {
+        const own = clean(current.textContent);
+        if (own) contexts.push(own);
+
+        const next = current.nextElementSibling;
+        if (next) {
+          const text = clean(next.textContent);
+          if (text) values.push(text);
+        }
+
+        if (current.parentElement?.nextElementSibling) {
+          const text = clean(current.parentElement.nextElementSibling.textContent);
+          if (text) values.push(text);
+        }
+
+        current = current.parentElement;
+      }
+
+      return { label: clean(node.textContent), contexts, values };
+    });
+
+    for (const context of data.contexts) {
+      const parsed = extractStatusFromText(context);
+      if (parsed) return parsed;
+    }
+
+    for (const value of data.values) {
+      const parsed = extractStatusFromText(`${data.label} ${value}`);
+      if (parsed) return parsed;
+      const direct = validExtractedStatus(data.label, value);
+      if (direct) return direct;
+    }
+  }
+
+  return null;
+}
+
+async function waitForCaseData(page) {
+  for (let attempt = 1; attempt <= 24; attempt += 1) {
+    let body = '';
+    try { body = normalizeText(await page.locator('body').innerText()); } catch {}
+    const pioPresent = body.includes(PIO_NUMBER);
+    const statusPresent = STATUS_LABEL_ANYWHERE.test(body);
+    if (pioPresent && statusPresent) return;
+    if (attempt === 1 || attempt === 8 || attempt === 16) {
+      console.log('Waiting for Przybysz case details to finish rendering…');
+    }
+    await page.waitForTimeout(500);
+  }
+}
+
+async function safeAuthenticatedStructureDiagnostics(page) {
+  let body = '';
+  try { body = normalizeText(await page.locator('body').innerText()); } catch {}
+
+  let exactPioNodes = 0;
+  let statusLabelNodes = 0;
+  try { exactPioNodes = await page.getByText(PIO_NUMBER, { exact: true }).count(); } catch {}
+  try { statusLabelNodes = await page.getByText(STATUS_LABEL_EXACT).count(); } catch {}
+
+  console.log('--- Safe authenticated structure diagnostics (no case values) ---');
+  console.log(`PIO present in page text: ${body.includes(PIO_NUMBER) ? 'yes' : 'no'}`);
+  console.log(`Exact PIO DOM nodes: ${exactPioNodes}`);
+  console.log(`Status-label text present: ${STATUS_LABEL_ANYWHERE.test(body) ? 'yes' : 'no'}`);
+  console.log(`Exact status-label DOM nodes: ${statusLabelNodes}`);
+  console.log('--- End diagnostics ---');
+}
+
+function statusFromBodyNearPio(bodyText) {
+  const flat = normalizeText(bodyText).replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  const pioIndex = flat.indexOf(PIO_NUMBER);
+  if (pioIndex < 0) return null;
+
+  let segment = flat.slice(Math.max(0, pioIndex - 500), Math.min(flat.length, pioIndex + 6000));
+  const localPioIndex = segment.indexOf(PIO_NUMBER);
+  const afterCurrent = segment.slice(localPioIndex + PIO_NUMBER.length);
+  const nextCase = afterCurrent.search(/\bnumer\s+wniosku\s*:?\s*\d{5,}\b/i);
+  if (nextCase >= 0) segment = segment.slice(0, localPioIndex + PIO_NUMBER.length + nextCase);
+
+  return extractStatusFromText(segment);
+}
+
 async function extractStrictStatus(page) {
+  await waitForCaseData(page);
+
   const pio = page.getByText(PIO_NUMBER, { exact: true }).first();
   const exactPioFound = (await pio.count()) > 0;
 
   if (exactPioFound) {
-    // Start at the exact PIO value and walk outward. The first ancestor that
-    // contains both the PIO and an explicit status is the safest representation
-    // of this application card, even when multiple applications exist.
     let current = pio;
-    for (let depth = 0; depth < 14; depth += 1) {
+    for (let depth = 0; depth < 16; depth += 1) {
       let text = '';
       try { text = normalizeText(await current.innerText()); } catch {}
 
-      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 30000) {
-        const status = extractStatusFromText(text);
-        if (status) return { ...status, pioMatchedExactly: true };
+      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 40000) {
+        const textStatus = extractStatusFromText(text);
+        if (textStatus) return { ...textStatus, pioMatchedExactly: true };
+
+        const domStatus = await extractStatusFromDom(current);
+        if (domStatus) return { ...domStatus, pioMatchedExactly: true };
       }
 
       current = current.locator('..');
     }
   }
 
-  // Fallback for portals that split the PIO into nested spans. Keep extraction
-  // bounded around the configured PIO instead of accepting any account status.
   const bodyText = normalizeText(await page.locator('body').innerText());
   if (!bodyText.includes(PIO_NUMBER)) {
+    await safeAuthenticatedStructureDiagnostics(page);
     throw new Error('The configured PIO number was not found after login. Refusing to create a baseline.');
   }
 
-  const lines = bodyText.split('\n');
-  const index = lines.findIndex((line) => line.includes(PIO_NUMBER));
-  let windowText;
-  if (lines.length === 1) {
-    const flatIndex = bodyText.indexOf(PIO_NUMBER);
-    windowText = bodyText.slice(Math.max(0, flatIndex - 1500), Math.min(bodyText.length, flatIndex + 3500));
-  } else {
-    windowText = lines.slice(Math.max(0, index - 12), Math.min(lines.length, index + 36)).join('\n');
-  }
+  const bodyStatus = statusFromBodyNearPio(bodyText);
+  if (bodyStatus) return { ...bodyStatus, pioMatchedExactly: exactPioFound };
 
-  const status = extractStatusFromText(windowText);
-  if (!status) {
-    throw new Error(
-      'The case was found, but no explicit status/stage field (for example "Etap realizacji" or "Status sprawy") could be identified. Refusing to save a false baseline.',
-    );
-  }
+  const domStatus = await extractStatusFromDom(page);
+  if (domStatus) return { ...domStatus, pioMatchedExactly: exactPioFound };
 
-  return { ...status, pioMatchedExactly: false };
+  await safeAuthenticatedStructureDiagnostics(page);
+  throw new Error(
+    'The case was found, but no explicit status/stage field could be isolated from its rendered application card. Refusing to save a false baseline.',
+  );
 }
 
 function readPreviousStatusFingerprint() {
