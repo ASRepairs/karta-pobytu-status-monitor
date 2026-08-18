@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -10,6 +11,11 @@ const PIO_NUMBER = process.env.PIO_NUMBER;
 const STATE_DIR = process.env.PIO_STATE_DIR || '.pio-state';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const RESULT_FILE = path.join(STATE_DIR, 'result.json');
+const PORTAL_HOST = new URL(BASE_URL).hostname;
+
+const PROXY_SERVER = process.env.PIO_PROXY_SERVER || '';
+const PROXY_USERNAME = process.env.PIO_PROXY_USERNAME || '';
+const PROXY_PASSWORD = process.env.PIO_PROXY_PASSWORD || '';
 
 for (const [name, value] of Object.entries({ PIO_LOGIN: LOGIN, PIO_PASSWORD: PASSWORD, PIO_NUMBER })) {
   if (!value) {
@@ -32,6 +38,120 @@ function fingerprint(value) {
   // Use a keyed digest so a public/cache-visible state cannot be dictionary-attacked
   // against the relatively small set of possible Polish case status strings.
   return crypto.createHmac('sha256', PASSWORD).update(value, 'utf8').digest('hex');
+}
+
+function isNetworkError(error) {
+  const text = String(error?.message || error);
+  return /ERR_(CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_CLOSED|TIMED_OUT|NAME_NOT_RESOLVED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|PROXY_CONNECTION_FAILED)/i.test(text);
+}
+
+async function resolveCandidateIpv4s(hostname) {
+  const addresses = new Set();
+
+  try {
+    for (const address of await dns.resolve4(hostname)) addresses.add(address);
+  } catch (error) {
+    console.log(`System DNS lookup failed: ${error.code || error.message}`);
+  }
+
+  // GitHub-hosted runners and the portal can occasionally disagree on DNS/network routing.
+  // Resolve through a public DoH endpoint as an independent fallback. Only the hostname is sent.
+  try {
+    const response = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`, {
+      headers: { accept: 'application/dns-json' },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (response.ok) {
+      const payload = await response.json();
+      for (const answer of payload.Answer || []) {
+        if (answer.type === 1 && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(answer.data)) {
+          addresses.add(answer.data);
+        }
+      }
+    }
+  } catch (error) {
+    console.log(`Public DNS fallback failed: ${error.message}`);
+  }
+
+  return [...addresses];
+}
+
+function launchOptions(forcedIpv4 = null) {
+  const args = ['--disable-dev-shm-usage'];
+
+  if (forcedIpv4) {
+    // Keep the HTTPS URL/hostname unchanged for SNI and certificate validation while
+    // forcing Chromium to connect to the independently resolved IPv4 address.
+    args.push(`--host-resolver-rules=MAP ${PORTAL_HOST} ${forcedIpv4},EXCLUDE localhost`);
+  }
+
+  const options = { headless: true, args };
+
+  if (PROXY_SERVER) {
+    options.proxy = {
+      server: PROXY_SERVER,
+      ...(PROXY_USERNAME ? { username: PROXY_USERNAME } : {}),
+      ...(PROXY_PASSWORD ? { password: PROXY_PASSWORD } : {}),
+    };
+  }
+
+  return options;
+}
+
+async function createPage(forcedIpv4 = null) {
+  const browser = await chromium.launch(launchOptions(forcedIpv4));
+  const context = await browser.newContext({
+    locale: 'pl-PL',
+    timezoneId: 'Europe/Warsaw',
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  return { browser, context, page };
+}
+
+async function gotoWithRetry(page, url, attempts = 3) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (error) {
+      lastError = error;
+      if (!isNetworkError(error) || attempt === attempts) throw error;
+      console.log(`Portal connection attempt ${attempt}/${attempts} failed; retrying…`);
+      await page.waitForTimeout(attempt * 1500);
+    }
+  }
+
+  throw lastError;
+}
+
+async function openPortalSession() {
+  const candidateIps = await resolveCandidateIpv4s(PORTAL_HOST);
+  const routes = [null, ...candidateIps];
+  let lastError;
+
+  for (const forcedIpv4 of routes) {
+    const session = await createPage(forcedIpv4);
+    try {
+      if (forcedIpv4) {
+        console.log('Retrying Przybysz with an independently resolved IPv4 route…');
+      }
+      await gotoWithRetry(session.page, `${BASE_URL}/login`);
+      return session;
+    } catch (error) {
+      lastError = error;
+      await session.browser.close();
+      if (!isNetworkError(error)) throw error;
+    }
+  }
+
+  const proxyHint = PROXY_SERVER
+    ? 'The configured proxy also could not reach the portal.'
+    : 'The portal may be refusing connections from the GitHub-hosted runner network. You can optionally configure PIO_PROXY_SERVER (and proxy credentials if needed), or use a self-hosted runner.';
+
+  throw new Error(`Could not connect to ${PORTAL_HOST} after normal, retry, and IPv4-routing attempts. ${proxyHint}\nLast error: ${lastError?.message || lastError}`);
 }
 
 async function firstVisible(page, selectors) {
@@ -150,24 +270,18 @@ function writeResult(outcome, currentFingerprint) {
   );
 }
 
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({
-  locale: 'pl-PL',
-  timezoneId: 'Europe/Warsaw',
-});
-const page = await context.newPage();
-page.setDefaultTimeout(15000);
+console.log('Opening Przybysz…');
+const { browser, page } = await openPortalSession();
 
 try {
-  console.log('Opening Przybysz…');
-  await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await fillLogin(page);
 
   console.log('Opening accepted applications…');
-  await page.goto(`${BASE_URL}/wnioski-przyjete`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+  await gotoWithRetry(page, `${BASE_URL}/wnioski-przyjete`);
   await page.waitForTimeout(1200);
 
-  if (/\/login(?:$|[/?#])/.test(new URL(page.url()).pathname + new URL(page.url()).search)) {
+  const currentUrl = new URL(page.url());
+  if (/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) {
     throw new Error('Login did not succeed. Check PIO_LOGIN and PIO_PASSWORD.');
   }
 
