@@ -14,6 +14,8 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 - Creates a keyed fingerprint of the relevant case block.
 - Compares it with the previous run.
 - Runs every day at **13:55 Europe/Warsaw**.
+- Uses **Node.js 24** and Node-24-compatible GitHub Actions.
+- Retries transient portal failures and can retry through independently resolved IPv4 addresses if runner DNS/routing is stale.
 - Intentionally does **not** print your residence-case details to public GitHub Actions logs.
 - On the first successful run, saves a baseline and does not notify.
 - If the case changes later, the workflow intentionally fails so GitHub can send a failed-workflow notification.
@@ -105,9 +107,25 @@ A manual successful run updates the baseline in the same way as a scheduled run.
 A failed run can mean either:
 
 1. **the case changed**, or
-2. **the monitor could not complete** because of login failure, portal downtime, or a Przybysz interface change.
+2. **the monitor could not complete** because of login failure, portal downtime, a network restriction, or a Przybysz interface change.
 
 Open the failed workflow. If the last failing step is **Status changed**, the monitor detected a real page change. If an earlier step failed, the automation itself needs attention.
+
+## Portal connectivity
+
+The Przybysz server may occasionally refuse or fail connections from a GitHub-hosted runner even while the portal works from a normal browser. The monitor therefore:
+
+1. retries transient Chromium network errors;
+2. resolves the portal independently and retries through IPv4 while keeping the original HTTPS hostname, SNI, and certificate validation;
+3. reports a clear connectivity error if the runner network still cannot reach DUW.
+
+For advanced cases, an optional trusted proxy can be configured with repository secrets:
+
+- `PIO_PROXY_SERVER` — for example `https://proxy.example:8443`;
+- `PIO_PROXY_USERNAME` — optional;
+- `PIO_PROXY_PASSWORD` — optional.
+
+**Do not use random/free public proxies.** A proxy used for an authenticated government portal must be one you trust. A self-hosted GitHub runner is the safer fallback if GitHub-hosted runner IP ranges are blocked by the portal.
 
 ## Portal compatibility
 
@@ -131,7 +149,7 @@ GitHub may disable scheduled workflows in public repositories after a long perio
 
 ## Local use
 
-You can also run it locally:
+You can also run it locally with Node.js 24:
 
 ```bash
 npm install
@@ -147,7 +165,7 @@ The local state is stored under `.pio-state/` and is ignored by Git.
 - Prefer a unique password for Przybysz.
 - If you accidentally publish a credential, rotate it immediately.
 - The monitor does not upload screenshots or HTML by default.
-- The monitor does not send your credentials to any third-party notification provider.
+- The monitor does not send your credentials to any third-party notification provider unless **you explicitly configure your own proxy**.
 
 ## License
 
