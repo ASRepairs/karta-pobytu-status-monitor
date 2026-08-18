@@ -29,10 +29,7 @@ function normalizeText(value) {
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
     .replace(/[\u00A0\u202F]/g, ' ')
     .replace(/\r/g, '')
-    .split('\n')
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join(' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -196,6 +193,25 @@ async function findLoginForm(page) {
   return null;
 }
 
+async function clickLoginEntryPoint(page) {
+  const candidates = [
+    page.getByRole('button', { name: /zaloguj|logowanie|login|sign in/i }).first(),
+    page.getByRole('link', { name: /zaloguj|logowanie|login|sign in/i }).first(),
+    page.locator('a[href*="login" i], a[href*="logow" i], button[data-target*="login" i]').first(),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
+        await candidate.click();
+        await page.waitForTimeout(1200);
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
 async function safePublicPageDiagnostics(page) {
   let title = '';
   try { title = await page.title(); } catch {}
@@ -205,11 +221,33 @@ async function safePublicPageDiagnostics(page) {
   console.log('--- End diagnostics ---');
 }
 
+async function authenticatedMarker(page) {
+  const candidates = [
+    page.getByText(/wnioski\s+przyjęte/i, { exact: false }).first(),
+    page.getByText(/wyloguj\s+się/i, { exact: false }).first(),
+    page.getByRole('link', { name: /wnioski\s+przyjęte/i }).first(),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      if ((await candidate.count()) && (await candidate.isVisible({ timeout: 300 }))) return true;
+    } catch {}
+  }
+  return false;
+}
+
 async function fillLogin(page) {
   let form = null;
-  for (let i = 0; i < 20 && !form; i += 1) {
+  for (let i = 0; i < 15 && !form; i += 1) {
     form = await findLoginForm(page);
     if (!form) await page.waitForTimeout(500);
+  }
+
+  if (!form && await clickLoginEntryPoint(page)) {
+    for (let i = 0; i < 12 && !form; i += 1) {
+      form = await findLoginForm(page);
+      if (!form) await page.waitForTimeout(500);
+    }
   }
 
   if (!form) {
@@ -226,22 +264,53 @@ async function fillLogin(page) {
   if (await submit.count()) await submit.click();
   else await form.passwordInput.press('Enter');
 
-  await page.waitForTimeout(1800);
+  // Do not infer authentication from the URL. Przybysz is an Angular SPA and
+  // can briefly retain or revisit /login while its authenticated shell renders.
+  for (let attempt = 1; attempt <= 40; attempt += 1) {
+    if (await authenticatedMarker(page)) {
+      console.log('Authenticated portal shell detected.');
+      return;
+    }
+    await page.waitForTimeout(500);
+  }
+
+  const passwordStillVisible = await firstVisible(page, PASSWORD_SELECTORS);
+  if (passwordStillVisible) {
+    throw new Error('Login form is still visible after submission. Check PIO_LOGIN and PIO_PASSWORD.');
+  }
+
+  throw new Error('Login submission completed, but the authenticated Przybysz navigation did not appear in time.');
 }
 
 async function openAcceptedApplications(page) {
-  // Prefer the canonical route. The portal is an Angular SPA, so the route may
-  // render before all application rows have arrived; the next step waits for the
-  // configured PIO explicitly.
-  await gotoWithRetry(page, `${BASE_URL}/wnioski-przyjete`);
+  // This is the navigation path that was already proven to work against the
+  // live portal. Prefer clicking the authenticated SPA menu over forcing a new
+  // top-level navigation immediately after login.
+  const navCandidates = [
+    page.getByRole('link', { name: /wnioski\s+przyjęte/i }).first(),
+    page.getByRole('button', { name: /wnioski\s+przyjęte/i }).first(),
+    page.getByText(/wnioski\s+przyjęte/i, { exact: false }).first(),
+  ];
 
-  const currentUrl = new URL(page.url());
-  if (/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) {
-    throw new Error('Login did not succeed. Check PIO_LOGIN and PIO_PASSWORD.');
+  for (const candidate of navCandidates) {
+    try {
+      if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
+        await candidate.click();
+        await page.waitForTimeout(1200);
+        return;
+      }
+    } catch {}
   }
+
+  // Fallback only after an authenticated marker has already been observed.
+  if (!(await authenticatedMarker(page))) {
+    throw new Error('Authenticated navigation disappeared before Wnioski przyjęte could be opened.');
+  }
+
+  await gotoWithRetry(page, `${BASE_URL}/wnioski-przyjete`, 2);
 }
 
-async function waitForExactPio(page, timeoutMs = 20000) {
+async function waitForExactPio(page, timeoutMs = 25000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     const exact = page.getByText(PIO_NUMBER, { exact: true }).first();
@@ -260,30 +329,17 @@ async function openConfiguredCaseDetails(page) {
     throw new Error('The configured PIO number was not found in Wnioski przyjęte.');
   }
 
-  const beforeUrl = page.url();
-
-  // The current Przybysz UI makes the application number itself the entry point
-  // to the details view. Depending on Angular's template, the number can be an
-  // <a>, a child of an <a>, or text inside a row carrying the click handler.
   const link = pio.locator('xpath=ancestor-or-self::a[1]');
-  if (await link.count()) {
-    await link.click();
-  } else {
-    await pio.click();
-  }
+  if (await link.count()) await link.click();
+  else await pio.click();
 
   const details = page.locator('app-applications-details').first();
   try {
-    await details.waitFor({ state: 'visible', timeout: 20000 });
+    await details.waitFor({ state: 'attached', timeout: 25000 });
+    await page.locator('app-applications-details table').first().waitFor({ state: 'visible', timeout: 20000 });
   } catch {
-    // If Angular changed the custom-element visibility semantics, accept a route
-    // change only when the details table is actually present.
-    if (page.url() === beforeUrl || !(await page.locator('app-applications-details table').count())) {
-      throw new Error('The PIO was found, but clicking it did not open the application details view.');
-    }
+    throw new Error('The PIO was found and clicked, but the application details table did not open.');
   }
-
-  await page.locator('app-applications-details table').first().waitFor({ state: 'visible', timeout: 15000 });
 }
 
 async function extractStatusFromDetailsTable(page) {
@@ -297,7 +353,12 @@ async function extractStatusFromDetailsTable(page) {
     throw new Error('The opened details view does not contain the configured PIO number. Refusing to monitor the wrong case.');
   }
 
-  const rows = details.locator('table tbody tr, table tr');
+  // Exact DOM structure observed in Przybysz:
+  // <tr>
+  //   <td class="text-right"><span translate>Etap realizacji</span>:</td>
+  //   <td class="text-left">STATUS</td>
+  // </tr>
+  const rows = details.locator('table tr');
   const rowCount = await rows.count();
 
   for (let i = 0; i < rowCount; i += 1) {
@@ -310,12 +371,9 @@ async function extractStatusFromDetailsTable(page) {
 
     const value = normalizeText(await cells.nth(1).innerText());
     if (!value) throw new Error('Etap realizacji was found, but its value is empty.');
-
     return { field: 'Etap realizacji', value };
   }
 
-  // Exact fallback for the DOM structure currently used by Przybysz:
-  // <tr><td><span translate>Etap realizacji</span>:</td><td>VALUE</td></tr>
   const labelSpan = details.locator('table tr td span[translate]').filter({ hasText: /^Etap\s+realizacji$/i }).first();
   if (await labelSpan.count()) {
     const row = labelSpan.locator('xpath=ancestor::tr[1]');
@@ -393,8 +451,7 @@ try {
     ? normalizeComparableStatus(EXPECTED_STATUS) === normalizedStatus
     : false;
 
-  // Verification happens before state is persisted. A wrong parser or wrong
-  // expected value therefore cannot replace the trusted baseline.
+  // Verify before writing state, so a parser mistake cannot replace the trusted baseline.
   if (expectedStatusChecked && !expectedStatusMatch) {
     console.log('Case found: yes');
     console.log('PIO matched exactly: yes');
