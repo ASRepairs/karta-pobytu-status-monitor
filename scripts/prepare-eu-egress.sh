@@ -63,9 +63,13 @@ if probe_direct; then
   exit 0
 fi
 
-# First automatic fallback: Tor. Only the monitor browser will use its local
-# SOCKS endpoint; the rest of the GitHub job stays on the normal runner route.
+# First automatic fallback: Tor. The Ubuntu package may start its own default
+# service, so stop that instance before starting our isolated client on 9050.
 echo 'Direct access failed. Trying an automatically configured European Tor exit…'
+sudo systemctl stop tor@default.service tor.service 2>/dev/null || true
+sudo pkill -x tor 2>/dev/null || true
+sleep 1
+
 rm -rf /tmp/kpsm-tor
 mkdir -p /tmp/kpsm-tor/data
 cat > /tmp/kpsm-tor/torrc <<'TORRC'
