@@ -35,8 +35,6 @@ function normalizeText(value) {
 }
 
 function fingerprint(value) {
-  // Use a keyed digest so a public/cache-visible state cannot be dictionary-attacked
-  // against the relatively small set of possible Polish case status strings.
   return crypto.createHmac('sha256', PASSWORD).update(value, 'utf8').digest('hex');
 }
 
@@ -54,8 +52,6 @@ async function resolveCandidateIpv4s(hostname) {
     console.log(`System DNS lookup failed: ${error.code || error.message}`);
   }
 
-  // GitHub-hosted runners and the portal can occasionally disagree on DNS/network routing.
-  // Resolve through a public DoH endpoint as an independent fallback. Only the hostname is sent.
   try {
     const response = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`, {
       headers: { accept: 'application/dns-json' },
@@ -81,8 +77,6 @@ function launchOptions(forcedIpv4 = null) {
   const args = ['--disable-dev-shm-usage'];
 
   if (forcedIpv4) {
-    // Keep the HTTPS URL/hostname unchanged for SNI and certificate validation while
-    // forcing Chromium to connect to the independently resolved IPv4 address.
     args.push(`--host-resolver-rules=MAP ${PORTAL_HOST} ${forcedIpv4},EXCLUDE localhost`);
   }
 
@@ -148,8 +142,8 @@ async function openPortalSession() {
   }
 
   const proxyHint = PROXY_SERVER
-    ? 'The configured proxy also could not reach the portal.'
-    : 'The portal may be refusing connections from the GitHub-hosted runner network. You can optionally configure PIO_PROXY_SERVER (and proxy credentials if needed), or use a self-hosted runner.';
+    ? 'The configured proxy also could not reach the portal. Verify that its exit node is in Europe and that the proxy is working.'
+    : 'Przybysz is geographically restricted to European access, while GitHub-hosted runners do not guarantee European egress. Configure a trusted European PIO_PROXY_SERVER, or run this workflow on a self-hosted runner located in Europe.';
 
   throw new Error(`Could not connect to ${PORTAL_HOST} after normal, retry, and IPv4-routing attempts. ${proxyHint}\nLast error: ${lastError?.message || lastError}`);
 }
@@ -201,7 +195,6 @@ async function fillLogin(page) {
     submit.click(),
   ]);
 
-  // Allow client-side applications to finish navigation/auth state updates.
   await page.waitForTimeout(1500);
 }
 
@@ -239,8 +232,6 @@ async function extractCaseBlock(page) {
     if (fallback) return fallback;
   }
 
-  // Last-resort extraction: use a small text window around the PIO number rather than
-  // hashing the entire account page, which could cause unrelated false alerts.
   const lines = normalizeText(await page.locator('body').innerText()).split('\n');
   const index = lines.findIndex((line) => line.includes(PIO_NUMBER));
   if (index < 0) throw new Error('Unable to isolate the configured case from the page.');
