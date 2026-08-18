@@ -282,10 +282,21 @@ async function fillLogin(page) {
   throw new Error('Login submission completed, but the authenticated Przybysz navigation did not appear in time.');
 }
 
+async function waitForAcceptedApplicationsList(page, timeoutMs = 25000) {
+  const submitted = page.locator('app-applications-submitted').first();
+  try {
+    await submitted.waitFor({ state: 'attached', timeout: timeoutMs });
+    await submitted.locator('table').first().waitFor({ state: 'attached', timeout: timeoutMs });
+    return submitted;
+  } catch {
+    throw new Error('Wnioski przyjęte opened, but its applications table did not finish rendering.');
+  }
+}
+
 async function openAcceptedApplications(page) {
-  // This is the navigation path that was already proven to work against the
-  // live portal. Prefer clicking the authenticated SPA menu over forcing a new
-  // top-level navigation immediately after login.
+  // Prefer the authenticated SPA menu. The live portal renders this page as
+  // <app-applications-submitted> and each case number links to
+  // /szczegoly-wniosku/<internal-id>.
   const navCandidates = [
     page.getByRole('link', { name: /wnioski\s+przyjęte/i }).first(),
     page.getByRole('button', { name: /wnioski\s+przyjęte/i }).first(),
@@ -296,49 +307,73 @@ async function openAcceptedApplications(page) {
     try {
       if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
         await candidate.click();
-        await page.waitForTimeout(1200);
+        await waitForAcceptedApplicationsList(page);
         return;
       }
     } catch {}
   }
 
-  // Fallback only after an authenticated marker has already been observed.
   if (!(await authenticatedMarker(page))) {
     throw new Error('Authenticated navigation disappeared before Wnioski przyjęte could be opened.');
   }
 
   await gotoWithRetry(page, `${BASE_URL}/wnioski-przyjete`, 2);
+  await waitForAcceptedApplicationsList(page);
 }
 
-async function waitForExactPio(page, timeoutMs = 25000) {
+async function findConfiguredCaseLink(page, timeoutMs = 30000) {
+  const submitted = page.locator('app-applications-submitted').first();
   const started = Date.now();
+
   while (Date.now() - started < timeoutMs) {
-    const exact = page.getByText(PIO_NUMBER, { exact: true }).first();
-    try {
-      if ((await exact.count()) && (await exact.isVisible({ timeout: 300 }))) return exact;
-    } catch {}
+    const links = submitted.locator('a[href^="/szczegoly-wniosku/"]');
+    const count = await links.count();
+
+    for (let i = 0; i < count; i += 1) {
+      const link = links.nth(i);
+      let text = '';
+      let href = '';
+      try {
+        text = normalizeText(await link.textContent());
+        href = (await link.getAttribute('href')) || '';
+      } catch {}
+
+      if (text === PIO_NUMBER && /^\/szczegoly-wniosku\/[^/?#]+\/?(?:[?#].*)?$/i.test(href)) {
+        return { link, href };
+      }
+    }
+
     await page.waitForTimeout(500);
   }
+
+  let detailLinkCount = 0;
+  try { detailLinkCount = await submitted.locator('a[href^="/szczegoly-wniosku/"]').count(); } catch {}
+  console.log(`Case-detail links present in Wnioski przyjęte: ${detailLinkCount}`);
   return null;
 }
 
 async function openConfiguredCaseDetails(page) {
   console.log('Opening configured case details…');
-  const pio = await waitForExactPio(page);
-  if (!pio) {
-    throw new Error('The configured PIO number was not found in Wnioski przyjęte.');
+  const match = await findConfiguredCaseLink(page);
+  if (!match) {
+    throw new Error('The configured PIO number was not found among the Wnioski przyjęte case links.');
   }
 
-  const link = pio.locator('xpath=ancestor-or-self::a[1]');
-  if (await link.count()) await link.click();
-  else await pio.click();
+  console.log('Configured PIO link found: yes');
+
+  // Navigate to the exact href emitted by the portal instead of depending on
+  // Playwright text visibility. The live DOM uses:
+  // <a href="/szczegoly-wniosku/<id>">PIO_NUMBER</a>.
+  // Using that href also avoids ambiguity if responsive CSS creates hidden cells.
+  const detailsUrl = new URL(match.href, `${BASE_URL}/`).toString();
+  await gotoWithRetry(page, detailsUrl, 2);
 
   const details = page.locator('app-applications-details').first();
   try {
     await details.waitFor({ state: 'attached', timeout: 25000 });
-    await page.locator('app-applications-details table').first().waitFor({ state: 'visible', timeout: 20000 });
+    await details.locator('table').first().waitFor({ state: 'visible', timeout: 20000 });
   } catch {
-    throw new Error('The PIO was found and clicked, but the application details table did not open.');
+    throw new Error('The configured PIO link was found, but its application details table did not open.');
   }
 }
 
