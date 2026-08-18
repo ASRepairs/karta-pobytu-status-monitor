@@ -32,14 +32,12 @@ function normalizeText(value) {
     .split('\n')
     .map((line) => line.replace(/\s+/g, ' ').trim())
     .filter(Boolean)
-    .join('\n');
+    .join(' ')
+    .trim();
 }
 
 function normalizeComparableStatus(value) {
-  return normalizeText(value)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLocaleLowerCase('pl-PL');
+  return normalizeText(value).toLocaleLowerCase('pl-PL');
 }
 
 function fingerprintStatus(value) {
@@ -122,6 +120,7 @@ async function gotoWithRetry(page, url, attempts = PROXY_SERVER ? 4 : 3) {
       await page.waitForTimeout(Math.min(6000, attempt * 2000));
     }
   }
+
   throw lastError;
 }
 
@@ -197,78 +196,25 @@ async function findLoginForm(page) {
   return null;
 }
 
-async function clickLoginEntryPoint(page) {
-  const candidates = [
-    page.getByRole('button', { name: /zaloguj|logowanie|login|sign in/i }).first(),
-    page.getByRole('link', { name: /zaloguj|logowanie|login|sign in/i }).first(),
-    page.locator('a[href*="login" i], a[href*="logow" i], button[data-target*="login" i]').first(),
-  ];
-
-  for (const candidate of candidates) {
-    try {
-      if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
-        await candidate.click();
-        await page.waitForTimeout(1200);
-        return true;
-      }
-    } catch {}
-  }
-  return false;
-}
-
 async function safePublicPageDiagnostics(page) {
   let title = '';
-  let bodyPreview = '';
   try { title = await page.title(); } catch {}
-  try { bodyPreview = normalizeText(await page.locator('body').innerText()).slice(0, 700); } catch {}
-
-  const frameInfo = [];
-  for (const frame of page.frames()) {
-    let inputs = [];
-    let buttons = [];
-    try {
-      inputs = await frame.locator('input').evaluateAll((nodes) => nodes.slice(0, 12).map((node) => ({
-        type: node.getAttribute('type') || '',
-        name: node.getAttribute('name') || '',
-        id: node.getAttribute('id') || '',
-        autocomplete: node.getAttribute('autocomplete') || '',
-        placeholder: node.getAttribute('placeholder') || '',
-      })));
-      buttons = await frame.locator('button, input[type="submit"], a').evaluateAll((nodes) => nodes.slice(0, 12).map((node) => ({
-        tag: node.tagName.toLowerCase(),
-        type: node.getAttribute('type') || '',
-        text: (node.textContent || node.getAttribute('value') || '').replace(/\s+/g, ' ').trim().slice(0, 80),
-        href: node.getAttribute('href') || '',
-      })));
-    } catch {}
-    frameInfo.push({ url: frame.url(), inputs, buttons });
-  }
-
   console.log('--- Safe pre-login diagnostics (public page only) ---');
   console.log(`URL: ${page.url()}`);
   console.log(`Title: ${title}`);
-  console.log(`Body preview: ${bodyPreview}`);
-  console.log(`Frames/forms: ${JSON.stringify(frameInfo)}`);
   console.log('--- End diagnostics ---');
 }
 
 async function fillLogin(page) {
   let form = null;
-  for (let i = 0; i < 15 && !form; i += 1) {
+  for (let i = 0; i < 20 && !form; i += 1) {
     form = await findLoginForm(page);
     if (!form) await page.waitForTimeout(500);
   }
 
-  if (!form && await clickLoginEntryPoint(page)) {
-    for (let i = 0; i < 12 && !form; i += 1) {
-      form = await findLoginForm(page);
-      if (!form) await page.waitForTimeout(500);
-    }
-  }
-
   if (!form) {
     await safePublicPageDiagnostics(page);
-    throw new Error('Could not identify the Przybysz login form. See the safe pre-login diagnostics above.');
+    throw new Error('Could not identify the Przybysz login form.');
   }
 
   await form.loginInput.fill(LOGIN);
@@ -276,6 +222,7 @@ async function fillLogin(page) {
 
   let submit = form.frame.getByRole('button', { name: /zaloguj|login|sign in/i }).first();
   if (!(await submit.count())) submit = form.frame.locator('button[type="submit"], input[type="submit"]').first();
+
   if (await submit.count()) await submit.click();
   else await form.passwordInput.press('Enter');
 
@@ -283,252 +230,103 @@ async function fillLogin(page) {
 }
 
 async function openAcceptedApplications(page) {
-  const navCandidates = [
-    page.getByRole('link', { name: /wnioski\s+przyjęte/i }).first(),
-    page.getByRole('button', { name: /wnioski\s+przyjęte/i }).first(),
-    page.getByText(/wnioski\s+przyjęte/i, { exact: false }).first(),
-  ];
+  // Prefer the canonical route. The portal is an Angular SPA, so the route may
+  // render before all application rows have arrived; the next step waits for the
+  // configured PIO explicitly.
+  await gotoWithRetry(page, `${BASE_URL}/wnioski-przyjete`);
 
-  for (const candidate of navCandidates) {
+  const currentUrl = new URL(page.url());
+  if (/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) {
+    throw new Error('Login did not succeed. Check PIO_LOGIN and PIO_PASSWORD.');
+  }
+}
+
+async function waitForExactPio(page, timeoutMs = 20000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const exact = page.getByText(PIO_NUMBER, { exact: true }).first();
     try {
-      if ((await candidate.count()) && (await candidate.isVisible({ timeout: 700 }))) {
-        await candidate.click();
-        await page.waitForTimeout(1200);
-        return;
-      }
+      if ((await exact.count()) && (await exact.isVisible({ timeout: 300 }))) return exact;
     } catch {}
-  }
-
-  const paths = ['/wnioski-przyjete', '/wnioski/przyjete', '/applications/accepted'];
-  let lastError;
-  for (const route of paths) {
-    try {
-      await gotoWithRetry(page, `${BASE_URL}${route}`, 1);
-      await page.waitForTimeout(800);
-      const currentUrl = new URL(page.url());
-      if (!/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) return;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  if (lastError) throw lastError;
-}
-
-const STATUS_FIELD_SOURCE = 'etap\\s+realizacji|status(?:\\s+sprawy)?|etap\\s+sprawy|stan\\s+sprawy';
-const FOLLOWING_FIELD_SOURCE = [
-  'sprawę\\s+prowadzi',
-  'osoba\\s+prowadząca',
-  'data\\s+przyjęcia(?:\\s+wniosku)?',
-  'data\\s+złożenia(?:\\s+wniosku)?',
-  'nr\\.?\\s*pio',
-  'numer\\s+(?:wniosku|pio)',
-  'rodzaj\\s+wniosku',
-  'typ\\s+wniosku',
-  'podgląd\\s+wniosku',
-  'komunikaty',
-].join('|');
-
-const STATUS_LABEL_PATTERN = new RegExp(`^(?:${STATUS_FIELD_SOURCE})\\b`, 'i');
-const STATUS_LINE_PATTERN = new RegExp(`^(?<label>${STATUS_FIELD_SOURCE})\\s*[:\\-–—]?\\s*(?<value>.*)$`, 'i');
-const NEXT_FIELD_PATTERN = new RegExp(`\\s+(?:${FOLLOWING_FIELD_SOURCE})\\s*[:\\-–—]?`, 'i');
-const OTHER_FIELD_LINE_PATTERN = new RegExp(`^(?:${FOLLOWING_FIELD_SOURCE})\\b`, 'i');
-const INLINE_STATUS_PATTERN = new RegExp(
-  `(?:^|\\s)(?<label>${STATUS_FIELD_SOURCE})\\s*[:\\-–—]?\\s*(?<value>.+?)(?=\\s+(?:${FOLLOWING_FIELD_SOURCE})\\s*[:\\-–—]?|$)`,
-  'i',
-);
-const STATUS_LABEL_EXACT = /^(?:etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)\s*:?[\s]*$/i;
-const STATUS_LABEL_ANYWHERE = /(?:etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)/i;
-
-function cleanStatusValue(value) {
-  let cleaned = normalizeText(value).replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-  const nextField = cleaned.search(NEXT_FIELD_PATTERN);
-  if (nextField > 0) cleaned = cleaned.slice(0, nextField).trim();
-  return cleaned.replace(/^[:\-–—\s]+/, '').trim();
-}
-
-function validExtractedStatus(field, value) {
-  const cleaned = cleanStatusValue(value);
-  if (!cleaned || cleaned.length > 1000 || STATUS_LABEL_PATTERN.test(cleaned) || OTHER_FIELD_LINE_PATTERN.test(cleaned)) return null;
-  return { field: normalizeText(field).replace(/\n/g, ' '), value: cleaned };
-}
-
-function extractStatusFromText(text) {
-  const normalized = normalizeText(text);
-  const lines = normalized.split('\n');
-
-  for (let i = 0; i < lines.length; i += 1) {
-    const match = lines[i].match(STATUS_LINE_PATTERN);
-    if (!match?.groups) continue;
-
-    let value = cleanStatusValue(match.groups.value);
-    if (!value) {
-      const collected = [];
-      for (let j = i + 1; j < Math.min(lines.length, i + 7); j += 1) {
-        const candidate = lines[j].trim();
-        if (!candidate) continue;
-        if (STATUS_LABEL_PATTERN.test(candidate) || OTHER_FIELD_LINE_PATTERN.test(candidate)) break;
-        collected.push(candidate);
-      }
-      value = cleanStatusValue(collected.join(' '));
-    }
-
-    const result = validExtractedStatus(match.groups.label, value);
-    if (result) return result;
-  }
-
-  const flat = normalized.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-  const inline = flat.match(INLINE_STATUS_PATTERN);
-  if (inline?.groups) {
-    const result = validExtractedStatus(inline.groups.label, inline.groups.value);
-    if (result) return result;
-  }
-
-  return null;
-}
-
-async function extractStatusFromDom(scope) {
-  const labels = scope.getByText(STATUS_LABEL_EXACT);
-  const count = Math.min(await labels.count(), 20);
-
-  for (let i = 0; i < count; i += 1) {
-    const label = labels.nth(i);
-    let visible = false;
-    try { visible = await label.isVisible({ timeout: 300 }); } catch {}
-    if (!visible) continue;
-
-    const data = await label.evaluate((node) => {
-      const clean = (value) => String(value || '')
-        .replace(/[\u200B-\u200D\uFEFF]/g, '')
-        .replace(/[\u00A0\u202F]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      const contexts = [];
-      const values = [];
-      let current = node;
-
-      for (let depth = 0; current && depth < 6; depth += 1) {
-        const own = clean(current.textContent);
-        if (own) contexts.push(own);
-
-        const next = current.nextElementSibling;
-        if (next) {
-          const text = clean(next.textContent);
-          if (text) values.push(text);
-        }
-
-        if (current.parentElement?.nextElementSibling) {
-          const text = clean(current.parentElement.nextElementSibling.textContent);
-          if (text) values.push(text);
-        }
-
-        current = current.parentElement;
-      }
-
-      return { label: clean(node.textContent), contexts, values };
-    });
-
-    for (const context of data.contexts) {
-      const parsed = extractStatusFromText(context);
-      if (parsed) return parsed;
-    }
-
-    for (const value of data.values) {
-      const parsed = extractStatusFromText(`${data.label} ${value}`);
-      if (parsed) return parsed;
-      const direct = validExtractedStatus(data.label, value);
-      if (direct) return direct;
-    }
-  }
-
-  return null;
-}
-
-async function waitForCaseData(page) {
-  for (let attempt = 1; attempt <= 24; attempt += 1) {
-    let body = '';
-    try { body = normalizeText(await page.locator('body').innerText()); } catch {}
-    const pioPresent = body.includes(PIO_NUMBER);
-    const statusPresent = STATUS_LABEL_ANYWHERE.test(body);
-    if (pioPresent && statusPresent) return;
-    if (attempt === 1 || attempt === 8 || attempt === 16) {
-      console.log('Waiting for Przybysz case details to finish rendering…');
-    }
     await page.waitForTimeout(500);
   }
+  return null;
 }
 
-async function safeAuthenticatedStructureDiagnostics(page) {
-  let body = '';
-  try { body = normalizeText(await page.locator('body').innerText()); } catch {}
+async function openConfiguredCaseDetails(page) {
+  console.log('Opening configured case details…');
+  const pio = await waitForExactPio(page);
+  if (!pio) {
+    throw new Error('The configured PIO number was not found in Wnioski przyjęte.');
+  }
 
-  let exactPioNodes = 0;
-  let statusLabelNodes = 0;
-  try { exactPioNodes = await page.getByText(PIO_NUMBER, { exact: true }).count(); } catch {}
-  try { statusLabelNodes = await page.getByText(STATUS_LABEL_EXACT).count(); } catch {}
+  const beforeUrl = page.url();
 
-  console.log('--- Safe authenticated structure diagnostics (no case values) ---');
-  console.log(`PIO present in page text: ${body.includes(PIO_NUMBER) ? 'yes' : 'no'}`);
-  console.log(`Exact PIO DOM nodes: ${exactPioNodes}`);
-  console.log(`Status-label text present: ${STATUS_LABEL_ANYWHERE.test(body) ? 'yes' : 'no'}`);
-  console.log(`Exact status-label DOM nodes: ${statusLabelNodes}`);
-  console.log('--- End diagnostics ---');
-}
+  // The current Przybysz UI makes the application number itself the entry point
+  // to the details view. Depending on Angular's template, the number can be an
+  // <a>, a child of an <a>, or text inside a row carrying the click handler.
+  const link = pio.locator('xpath=ancestor-or-self::a[1]');
+  if (await link.count()) {
+    await link.click();
+  } else {
+    await pio.click();
+  }
 
-function statusFromBodyNearPio(bodyText) {
-  const flat = normalizeText(bodyText).replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
-  const pioIndex = flat.indexOf(PIO_NUMBER);
-  if (pioIndex < 0) return null;
-
-  let segment = flat.slice(Math.max(0, pioIndex - 500), Math.min(flat.length, pioIndex + 6000));
-  const localPioIndex = segment.indexOf(PIO_NUMBER);
-  const afterCurrent = segment.slice(localPioIndex + PIO_NUMBER.length);
-  const nextCase = afterCurrent.search(/\bnumer\s+wniosku\s*:?\s*\d{5,}\b/i);
-  if (nextCase >= 0) segment = segment.slice(0, localPioIndex + PIO_NUMBER.length + nextCase);
-
-  return extractStatusFromText(segment);
-}
-
-async function extractStrictStatus(page) {
-  await waitForCaseData(page);
-
-  const pio = page.getByText(PIO_NUMBER, { exact: true }).first();
-  const exactPioFound = (await pio.count()) > 0;
-
-  if (exactPioFound) {
-    let current = pio;
-    for (let depth = 0; depth < 16; depth += 1) {
-      let text = '';
-      try { text = normalizeText(await current.innerText()); } catch {}
-
-      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 40000) {
-        const textStatus = extractStatusFromText(text);
-        if (textStatus) return { ...textStatus, pioMatchedExactly: true };
-
-        const domStatus = await extractStatusFromDom(current);
-        if (domStatus) return { ...domStatus, pioMatchedExactly: true };
-      }
-
-      current = current.locator('..');
+  const details = page.locator('app-applications-details').first();
+  try {
+    await details.waitFor({ state: 'visible', timeout: 20000 });
+  } catch {
+    // If Angular changed the custom-element visibility semantics, accept a route
+    // change only when the details table is actually present.
+    if (page.url() === beforeUrl || !(await page.locator('app-applications-details table').count())) {
+      throw new Error('The PIO was found, but clicking it did not open the application details view.');
     }
   }
 
-  const bodyText = normalizeText(await page.locator('body').innerText());
-  if (!bodyText.includes(PIO_NUMBER)) {
-    await safeAuthenticatedStructureDiagnostics(page);
-    throw new Error('The configured PIO number was not found after login. Refusing to create a baseline.');
+  await page.locator('app-applications-details table').first().waitFor({ state: 'visible', timeout: 15000 });
+}
+
+async function extractStatusFromDetailsTable(page) {
+  const details = page.locator('app-applications-details').first();
+  if (!(await details.count())) {
+    throw new Error('Application details component was not found after opening the configured PIO.');
   }
 
-  const bodyStatus = statusFromBodyNearPio(bodyText);
-  if (bodyStatus) return { ...bodyStatus, pioMatchedExactly: exactPioFound };
+  const detailText = normalizeText(await details.innerText());
+  if (!detailText.includes(PIO_NUMBER)) {
+    throw new Error('The opened details view does not contain the configured PIO number. Refusing to monitor the wrong case.');
+  }
 
-  const domStatus = await extractStatusFromDom(page);
-  if (domStatus) return { ...domStatus, pioMatchedExactly: exactPioFound };
+  const rows = details.locator('table tbody tr, table tr');
+  const rowCount = await rows.count();
 
-  await safeAuthenticatedStructureDiagnostics(page);
-  throw new Error(
-    'The case was found, but no explicit status/stage field could be isolated from its rendered application card. Refusing to save a false baseline.',
-  );
+  for (let i = 0; i < rowCount; i += 1) {
+    const row = rows.nth(i);
+    const cells = row.locator('td');
+    if ((await cells.count()) < 2) continue;
+
+    const label = normalizeText(await cells.nth(0).innerText()).replace(/:\s*$/, '').trim();
+    if (!/^Etap\s+realizacji$/i.test(label)) continue;
+
+    const value = normalizeText(await cells.nth(1).innerText());
+    if (!value) throw new Error('Etap realizacji was found, but its value is empty.');
+
+    return { field: 'Etap realizacji', value };
+  }
+
+  // Exact fallback for the DOM structure currently used by Przybysz:
+  // <tr><td><span translate>Etap realizacji</span>:</td><td>VALUE</td></tr>
+  const labelSpan = details.locator('table tr td span[translate]').filter({ hasText: /^Etap\s+realizacji$/i }).first();
+  if (await labelSpan.count()) {
+    const row = labelSpan.locator('xpath=ancestor::tr[1]');
+    const cells = row.locator('td');
+    if ((await cells.count()) >= 2) {
+      const value = normalizeText(await cells.nth(1).innerText());
+      if (value) return { field: 'Etap realizacji', value };
+    }
+  }
+
+  throw new Error('The configured case details were opened, but the Etap realizacji row could not be read from its table.');
 }
 
 function readPreviousStatusFingerprint() {
@@ -542,12 +340,13 @@ function readPreviousStatusFingerprint() {
   }
 }
 
-function writeResult({ outcome, statusFingerprint, statusField, pioMatchedExactly, expectedStatusChecked, expectedStatusMatch }) {
+function writeResult({ outcome, statusFingerprint, expectedStatusChecked, expectedStatusMatch }) {
   fs.writeFileSync(
     STATE_FILE,
     JSON.stringify({ version: 2, statusFingerprint }, null, 2) + '\n',
     'utf8',
   );
+
   fs.writeFileSync(
     RESULT_FILE,
     JSON.stringify({
@@ -555,10 +354,11 @@ function writeResult({ outcome, statusFingerprint, statusField, pioMatchedExactl
       outcome,
       case_found: true,
       pio_matched: true,
-      pio_matched_exactly: pioMatchedExactly,
+      pio_matched_exactly: true,
+      details_view_opened: true,
       status_field_found: true,
       status_fingerprint_saved: true,
-      status_field: statusField,
+      status_field: 'Etap realizacji',
       expected_status_checked: expectedStatusChecked,
       expected_status_match: expectedStatusChecked ? expectedStatusMatch : null,
     }, null, 2) + '\n',
@@ -572,22 +372,13 @@ const { browser, page } = await openPortalSession();
 try {
   await fillLogin(page);
 
-  const currentUrlAfterLogin = new URL(page.url());
-  if (/\/login(?:$|[/?#])/.test(currentUrlAfterLogin.pathname + currentUrlAfterLogin.search)) {
-    await page.waitForTimeout(2200);
-  }
-
   console.log('Opening accepted applications…');
   await openAcceptedApplications(page);
+  await openConfiguredCaseDetails(page);
 
-  const currentUrl = new URL(page.url());
-  if (/\/login(?:$|[/?#])/.test(currentUrl.pathname + currentUrl.search)) {
-    throw new Error('Login did not succeed. Check PIO_LOGIN and PIO_PASSWORD.');
-  }
-
-  const { field: statusField, value: statusValue, pioMatchedExactly } = await extractStrictStatus(page);
+  const { field: statusField, value: statusValue } = await extractStatusFromDetailsTable(page);
   const normalizedStatus = normalizeComparableStatus(statusValue);
-  if (!normalizedStatus) throw new Error('An explicit status field was found but its value was empty.');
+  if (!normalizedStatus) throw new Error('Etap realizacji was found but normalized to an empty value.');
 
   const currentFingerprint = fingerprintStatus(normalizedStatus);
   const previousFingerprint = readPreviousStatusFingerprint();
@@ -602,30 +393,32 @@ try {
     ? normalizeComparableStatus(EXPECTED_STATUS) === normalizedStatus
     : false;
 
+  // Verification happens before state is persisted. A wrong parser or wrong
+  // expected value therefore cannot replace the trusted baseline.
+  if (expectedStatusChecked && !expectedStatusMatch) {
+    console.log('Case found: yes');
+    console.log('PIO matched exactly: yes');
+    console.log('Details view opened: yes');
+    console.log(`Status field found: ${statusField}`);
+    console.log('Expected status match: no');
+    throw new Error('Strict verification failed: the extracted Etap realizacji value does not match PIO_EXPECTED_STATUS. No readable status was printed.');
+  }
+
   writeResult({
     outcome,
     statusFingerprint: currentFingerprint,
-    statusField,
-    pioMatchedExactly,
     expectedStatusChecked,
     expectedStatusMatch,
   });
 
   console.log('Case found: yes');
-  console.log('PIO matched: yes');
-  console.log(`PIO matched exactly: ${pioMatchedExactly ? 'yes' : 'no'}`);
-  console.log('Status field found: yes');
-  console.log(`Status field: ${statusField}`);
+  console.log('PIO matched exactly: yes');
+  console.log('Details view opened: yes');
+  console.log(`Status field found: ${statusField}`);
   console.log('Status fingerprint saved: yes');
+  if (expectedStatusChecked) console.log('Expected status match: yes');
 
-  if (expectedStatusChecked) {
-    console.log(`Expected status match: ${expectedStatusMatch ? 'yes' : 'no'}`);
-    if (!expectedStatusMatch) {
-      throw new Error('Strict verification failed: the extracted status does not match PIO_EXPECTED_STATUS. No readable status was printed.');
-    }
-  }
-
-  if (outcome === 'baseline') console.log('Strict status baseline saved. Future checks will compare the explicit status value only.');
+  if (outcome === 'baseline') console.log('Strict status baseline saved. Future checks will compare Etap realizacji only.');
   if (outcome === 'unchanged') console.log('No explicit case status change detected.');
   if (outcome === 'changed') console.log('Explicit case status change detected.');
 } finally {
