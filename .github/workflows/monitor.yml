@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: ubuntu-24.04
+    # Przybysz currently refuses TCP connections from the standard Ubuntu/Azure
+    # GitHub-hosted runner pool. macOS uses a distinct GitHub-hosted runner pool,
+    # so use it by default rather than requiring users to configure a proxy.
+    runs-on: macos-15-intel
     timeout-minutes: 12
 
     steps:
@@ -32,7 +35,7 @@ jobs:
         run: npm install
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Restore previous private fingerprint
         uses: actions/cache/restore@v5
@@ -69,7 +72,7 @@ jobs:
         run: |
           echo '## 🔔 Karta pobytu status changed' >> "$GITHUB_STEP_SUMMARY"
           echo 'Log in to Przybysz to see the new status. The monitor intentionally does not expose your case details in GitHub logs.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'A change was detected. Failing this run intentionally so GitHub can send a failed-workflow email notification.'
+          echo 'A change was detected. Failing this run intentionally so GitHub can surface a failed-workflow notification.'
           exit 1
 
       - name: First-run note
