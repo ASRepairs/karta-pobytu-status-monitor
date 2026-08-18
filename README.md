@@ -15,6 +15,7 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 - Compares it with the previous run.
 - Runs every day at **13:55 Europe/Warsaw**.
 - Uses **Node.js 24** and Node-24-compatible GitHub Actions.
+- Uses a **macOS GitHub-hosted runner** by default because repeated live tests showed the Przybysz server refusing connections from the standard Ubuntu runner network.
 - Retries transient portal failures and can retry through independently resolved IPv4 addresses if runner DNS/routing is stale.
 - Intentionally does **not** print your residence-case details to public GitHub Actions logs.
 - On the first successful run, saves a baseline and does not notify.
@@ -105,7 +106,11 @@ Open the failed workflow. If the last failing step is **Status changed**, the mo
 
 ## Portal connectivity
 
-The Przybysz server may occasionally refuse or fail connections from a GitHub-hosted runner even while the portal works from a normal browser. The monitor therefore:
+The portal itself is currently online and is still linked by the Dolnośląski Urząd Wojewódzki. However, live workflow tests showed repeated `ERR_CONNECTION_REFUSED` responses from the standard Ubuntu GitHub-hosted runner before authentication even began.
+
+The default workflow therefore uses a **macOS GitHub-hosted runner**, which comes from a different GitHub runner network pool. This gives the monitor another egress path without sending credentials through a third-party proxy.
+
+The monitor also:
 
 1. retries transient Chromium network errors;
 2. resolves the portal independently and retries through IPv4 while keeping the original HTTPS hostname, SNI, and certificate validation;
@@ -117,7 +122,7 @@ For advanced cases, an optional trusted proxy can be configured with repository 
 - `PIO_PROXY_USERNAME` — optional;
 - `PIO_PROXY_PASSWORD` — optional.
 
-**Do not use random/free public proxies.** A proxy used for an authenticated government portal must be one you trust. A self-hosted GitHub runner is the safer fallback if GitHub-hosted runner IP ranges are blocked by the portal.
+**Do not use random/free public proxies.** A proxy used for an authenticated government portal must be one you trust. A self-hosted GitHub runner is the safer fallback if all GitHub-hosted runner networks are blocked by the portal.
 
 ## Portal compatibility
 
