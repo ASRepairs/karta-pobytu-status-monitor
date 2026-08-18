@@ -8,6 +8,7 @@ const BASE_URL = (process.env.PIO_BASE_URL || 'https://pio-przybysz.duw.pl').rep
 const LOGIN = process.env.PIO_LOGIN;
 const PASSWORD = process.env.PIO_PASSWORD;
 const PIO_NUMBER = process.env.PIO_NUMBER;
+const EXPECTED_STATUS = process.env.PIO_EXPECTED_STATUS || '';
 const STATE_DIR = process.env.PIO_STATE_DIR || '.pio-state';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const RESULT_FILE = path.join(STATE_DIR, 'result.json');
@@ -32,7 +33,15 @@ function normalizeText(value) {
     .join('\n');
 }
 
-function fingerprint(value) {
+function normalizeComparableStatus(value) {
+  return normalizeText(value)
+    .replace(/[\u00a0\u202f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase('pl-PL');
+}
+
+function fingerprintStatus(value) {
   return crypto.createHmac('sha256', PASSWORD).update(value, 'utf8').digest('hex');
 }
 
@@ -175,8 +184,6 @@ async function findLoginForm(page) {
 
     let loginInput = await firstVisible(frame, LOGIN_SELECTORS);
     if (!loginInput) {
-      // Last-resort fallback: use the first visible non-password, non-hidden input
-      // in the same frame as the password field.
       loginInput = await firstVisible(frame, [
         'input:not([type="password"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"])',
       ]);
@@ -208,8 +215,6 @@ async function clickLoginEntryPoint(page) {
 }
 
 async function safePublicPageDiagnostics(page) {
-  // This executes only before credentials are filled. Keep diagnostics structural
-  // and bounded so a public Actions log never contains account/case information.
   let title = '';
   let bodyPreview = '';
   try { title = await page.title(); } catch {}
@@ -248,22 +253,16 @@ async function safePublicPageDiagnostics(page) {
 }
 
 async function fillLogin(page) {
-  // Przybysz is a client-rendered application on some deployments. Give it time
-  // to mount the form instead of assuming DOMContentLoaded means the UI is ready.
   let form = null;
   for (let i = 0; i < 15 && !form; i += 1) {
     form = await findLoginForm(page);
     if (!form) await page.waitForTimeout(500);
   }
 
-  if (!form) {
-    // Some versions expose a landing page first and render the actual form only
-    // after clicking a login entry point.
-    if (await clickLoginEntryPoint(page)) {
-      for (let i = 0; i < 12 && !form; i += 1) {
-        form = await findLoginForm(page);
-        if (!form) await page.waitForTimeout(500);
-      }
+  if (!form && await clickLoginEntryPoint(page)) {
+    for (let i = 0; i < 12 && !form; i += 1) {
+      form = await findLoginForm(page);
+      if (!form) await page.waitForTimeout(500);
     }
   }
 
@@ -277,19 +276,13 @@ async function fillLogin(page) {
 
   let submit = form.frame.getByRole('button', { name: /zaloguj|login|sign in/i }).first();
   if (!(await submit.count())) submit = form.frame.locator('button[type="submit"], input[type="submit"]').first();
-  if (!(await submit.count())) {
-    // A few frameworks submit on Enter without rendering a semantic submit button.
-    await form.passwordInput.press('Enter');
-  } else {
-    await submit.click();
-  }
+  if (!(await submit.count())) await form.passwordInput.press('Enter');
+  else await submit.click();
 
   await page.waitForTimeout(1800);
 }
 
 async function openAcceptedApplications(page) {
-  // Prefer the portal's own navigation label because route names are more likely
-  // to change than the visible Polish section name.
   const navCandidates = [
     page.getByRole('link', { name: /wnioski\s+przyjęte/i }).first(),
     page.getByRole('button', { name: /wnioski\s+przyjęte/i }).first(),
@@ -319,47 +312,120 @@ async function openAcceptedApplications(page) {
   if (lastError) throw lastError;
 }
 
-async function extractCaseBlock(page) {
-  const pio = page.getByText(PIO_NUMBER, { exact: true }).first();
-  if (!(await pio.count())) {
-    const body = normalizeText(await page.locator('body').innerText());
-    if (!body.includes(PIO_NUMBER)) throw new Error('The configured PIO number was not found in Wnioski przyjęte.');
-  }
+const STATUS_LABEL_PATTERN = /^(etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)\b/i;
+const STATUS_LINE_PATTERN = /^(?<label>etap\s+realizacji|status(?:\s+sprawy)?|etap\s+sprawy|stan\s+sprawy)\s*[:\-–—]?\s*(?<value>.*)$/i;
+const NEXT_FIELD_PATTERN = /\s+(?:sprawę\s+prowadzi|osoba\s+prowadząca|data\s+przyjęcia|data\s+złożenia|nr\.?\s*pio|numer\s+pio|pio|rodzaj\s+wniosku|typ\s+wniosku)\s*[:\-–—]?/i;
+const OTHER_FIELD_LINE_PATTERN = /^(?:sprawę\s+prowadzi|osoba\s+prowadząca|data\s+przyjęcia|data\s+złożenia|nr\.?\s*pio|numer\s+pio|pio|rodzaj\s+wniosku|typ\s+wniosku)\b/i;
 
-  if (await pio.count()) {
-    let current = pio;
-    let fallback = null;
-    for (let depth = 0; depth < 9; depth += 1) {
-      let text = '';
-      try { text = normalizeText(await current.innerText()); } catch {}
-      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 12000) {
-        fallback = text;
-        if (/etap realizacji|status|sprawę prowadzi|data przyjęcia|decyzj|pismo/i.test(text)) return text;
-      }
-      current = current.locator('..');
-    }
-    if (fallback) return fallback;
-  }
-
-  const lines = normalizeText(await page.locator('body').innerText()).split('\n');
-  const index = lines.findIndex((line) => line.includes(PIO_NUMBER));
-  if (index < 0) throw new Error('Unable to isolate the configured case from the page.');
-  return lines.slice(Math.max(0, index - 8), Math.min(lines.length, index + 24)).join('\n');
+function cleanStatusValue(value) {
+  let cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+  const nextField = cleaned.search(NEXT_FIELD_PATTERN);
+  if (nextField > 0) cleaned = cleaned.slice(0, nextField).trim();
+  return cleaned.replace(/^[:\-–—\s]+/, '').trim();
 }
 
-function readPreviousFingerprint() {
+function extractStatusFromText(text) {
+  const lines = normalizeText(text).split('\n');
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const match = line.match(STATUS_LINE_PATTERN);
+    if (!match?.groups) continue;
+
+    const field = match.groups.label.replace(/\s+/g, ' ').trim();
+    let value = cleanStatusValue(match.groups.value);
+
+    if (!value) {
+      for (let j = i + 1; j < Math.min(lines.length, i + 4); j += 1) {
+        const candidate = lines[j].trim();
+        if (!candidate) continue;
+        if (STATUS_LABEL_PATTERN.test(candidate) || OTHER_FIELD_LINE_PATTERN.test(candidate)) break;
+        value = cleanStatusValue(candidate);
+        if (value) break;
+      }
+    }
+
+    if (value && value.length <= 1000 && !STATUS_LABEL_PATTERN.test(value)) {
+      return { field, value };
+    }
+  }
+
+  return null;
+}
+
+async function extractStrictStatus(page) {
+  const pio = page.getByText(PIO_NUMBER, { exact: true }).first();
+  const exactPioFound = (await pio.count()) > 0;
+
+  if (exactPioFound) {
+    let current = pio;
+    for (let depth = 0; depth < 10; depth += 1) {
+      let text = '';
+      try { text = normalizeText(await current.innerText()); } catch {}
+
+      if (text.includes(PIO_NUMBER) && text.length >= 20 && text.length <= 12000) {
+        const status = extractStatusFromText(text);
+        if (status) return { ...status, caseText: text, pioMatchedExactly: true };
+      }
+
+      current = current.locator('..');
+    }
+  }
+
+  const bodyText = normalizeText(await page.locator('body').innerText());
+  if (!bodyText.includes(PIO_NUMBER)) {
+    throw new Error('The configured PIO number was not found after login. Refusing to create a baseline.');
+  }
+
+  const lines = bodyText.split('\n');
+  const index = lines.findIndex((line) => line.includes(PIO_NUMBER));
+  const windowText = lines
+    .slice(Math.max(0, index - 12), Math.min(lines.length, index + 36))
+    .join('\n');
+  const status = extractStatusFromText(windowText);
+
+  if (!status) {
+    throw new Error(
+      'The case was found, but no explicit status/stage field (for example "Etap realizacji" or "Status sprawy") could be identified. Refusing to save a false baseline.',
+    );
+  }
+
+  return { ...status, caseText: windowText, pioMatchedExactly: false };
+}
+
+function readPreviousStatusFingerprint() {
   if (!fs.existsSync(STATE_FILE)) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    return typeof parsed.fingerprint === 'string' ? parsed.fingerprint : null;
+    if (parsed.version !== 2) return null;
+    return typeof parsed.statusFingerprint === 'string' ? parsed.statusFingerprint : null;
   } catch {
     return null;
   }
 }
 
-function writeResult(outcome, currentFingerprint) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ version: 1, fingerprint: currentFingerprint }, null, 2) + '\n', 'utf8');
-  fs.writeFileSync(RESULT_FILE, JSON.stringify({ version: 1, outcome }, null, 2) + '\n', 'utf8');
+function writeResult({ outcome, statusFingerprint, statusField, pioMatchedExactly, expectedStatusChecked, expectedStatusMatch }) {
+  fs.writeFileSync(
+    STATE_FILE,
+    JSON.stringify({ version: 2, statusFingerprint }, null, 2) + '\n',
+    'utf8',
+  );
+  fs.writeFileSync(
+    RESULT_FILE,
+    JSON.stringify({
+      version: 2,
+      outcome,
+      case_found: true,
+      pio_matched: true,
+      pio_matched_exactly: pioMatchedExactly,
+      status_field_found: true,
+      status_fingerprint_saved: true,
+      status_field: statusField,
+      expected_status_checked: expectedStatusChecked,
+      expected_status_match: expectedStatusChecked ? expectedStatusMatch : null,
+    }, null, 2) + '\n',
+    'utf8',
+  );
 }
 
 console.log('Opening Przybysz…');
@@ -369,10 +435,7 @@ try {
   await fillLogin(page);
 
   const currentUrlAfterLogin = new URL(page.url());
-  const loginPath = currentUrlAfterLogin.pathname + currentUrlAfterLogin.search;
-  if (/\/login(?:$|[/?#])/.test(loginPath)) {
-    // Some SPA logins keep the same URL briefly; allow a little more time before
-    // deciding authentication failed.
+  if (/\/login(?:$|[/?#])/.test(currentUrlAfterLogin.pathname + currentUrlAfterLogin.search)) {
     await page.waitForTimeout(2200);
   }
 
@@ -384,19 +447,48 @@ try {
     throw new Error('Login did not succeed. Check PIO_LOGIN and PIO_PASSWORD.');
   }
 
-  const caseText = await extractCaseBlock(page);
-  const currentFingerprint = fingerprint(caseText);
-  const previousFingerprint = readPreviousFingerprint();
+  const { field: statusField, value: statusValue, pioMatchedExactly } = await extractStrictStatus(page);
+  const normalizedStatus = normalizeComparableStatus(statusValue);
+  if (!normalizedStatus) throw new Error('An explicit status field was found but its value was empty.');
+
+  const currentFingerprint = fingerprintStatus(normalizedStatus);
+  const previousFingerprint = readPreviousStatusFingerprint();
   const outcome = previousFingerprint === null
     ? 'baseline'
     : previousFingerprint === currentFingerprint
       ? 'unchanged'
       : 'changed';
 
-  writeResult(outcome, currentFingerprint);
-  if (outcome === 'baseline') console.log('Baseline saved. Future checks will notify on changes.');
-  if (outcome === 'unchanged') console.log('No case status change detected.');
-  if (outcome === 'changed') console.log('Case status change detected.');
+  const expectedStatusChecked = Boolean(EXPECTED_STATUS);
+  const expectedStatusMatch = expectedStatusChecked
+    ? normalizeComparableStatus(EXPECTED_STATUS) === normalizedStatus
+    : false;
+
+  writeResult({
+    outcome,
+    statusFingerprint: currentFingerprint,
+    statusField,
+    pioMatchedExactly,
+    expectedStatusChecked,
+    expectedStatusMatch,
+  });
+
+  console.log('Case found: yes');
+  console.log('PIO matched: yes');
+  console.log('Status field found: yes');
+  console.log(`Status field: ${statusField}`);
+  console.log('Status fingerprint saved: yes');
+
+  if (expectedStatusChecked) {
+    console.log(`Expected status match: ${expectedStatusMatch ? 'yes' : 'no'}`);
+    if (!expectedStatusMatch) {
+      throw new Error('Strict verification failed: the extracted status does not match PIO_EXPECTED_STATUS. No readable status was printed.');
+    }
+  }
+
+  if (outcome === 'baseline') console.log('Strict status baseline saved. Future checks will compare the explicit status value only.');
+  if (outcome === 'unchanged') console.log('No explicit case status change detected.');
+  if (outcome === 'changed') console.log('Explicit case status change detected.');
 } finally {
   await browser.close();
 }
