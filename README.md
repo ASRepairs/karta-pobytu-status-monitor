@@ -13,7 +13,7 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 - Finds the configured PIO case.
 - Creates a keyed fingerprint of the relevant case block.
 - Compares it with the previous run.
-- Runs every day at **08:17 Europe/Warsaw**.
+- Runs every day at **13:55 Europe/Warsaw**.
 - Intentionally does **not** print your residence-case details to public GitHub Actions logs.
 - On the first successful run, saves a baseline and does not notify.
 - If the case changes later, the workflow intentionally fails so GitHub can send a failed-workflow notification.
@@ -121,11 +121,11 @@ The default schedule is:
 
 ```yaml
 schedule:
-  - cron: '17 8 * * *'
+  - cron: '55 13 * * *'
     timezone: 'Europe/Warsaw'
 ```
 
-The unusual minute (`17`) is intentional. GitHub recommends avoiding the beginning of the hour because scheduled Actions jobs can be delayed during periods of high load.
+The minute (`55`) is intentionally away from the beginning of the hour because scheduled Actions jobs can be delayed during periods of high load.
 
 GitHub may disable scheduled workflows in public repositories after a long period without repository activity. If that happens in your fork, open the **Actions** tab and re-enable the workflow.
 
