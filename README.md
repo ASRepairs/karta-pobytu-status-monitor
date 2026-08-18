@@ -18,7 +18,7 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 - Retries transient portal failures and can retry through independently resolved IPv4 addresses if runner DNS/routing is stale.
 - Intentionally does **not** print your residence-case details to public GitHub Actions logs.
 - On the first successful run, saves a baseline and does not notify.
-- If the case changes later, the workflow intentionally fails so GitHub can send a failed-workflow notification.
+- If the case changes later, the workflow intentionally fails. GitHub records that failed run and may send an email/web notification according to the GitHub account's Actions notification preferences.
 
 ## Privacy
 
@@ -64,25 +64,17 @@ Then open **Karta pobytu status monitor** and click **Run workflow** once.
 
 The first successful run establishes the baseline.
 
-### 4. Turn on email notifications
+### 4. Notifications
 
-GitHub can email you when a workflow fails. This monitor deliberately marks the workflow as failed when it detects a status change.
+When the monitor detects a case change, it deliberately marks that workflow run as **failed**. This gives GitHub a clear failure event that can be surfaced through GitHub's normal Actions notifications.
 
-In GitHub, open:
+GitHub controls delivery of those notifications at the **account level**, not in this repository. Depending on your GitHub notification preferences, a failed Actions run may appear by email, on GitHub, or in GitHub Mobile.
 
-**Settings → Notifications → System → Actions**
+GitHub's current documentation says Actions notification preferences can be managed from the account's **Notification settings**, under **System → Actions**, where email/web delivery and a failed-workflows-only option may be available. GitHub does **not** document Actions email notifications as guaranteed to be enabled by default, so this project does not assume that every user will receive an email automatically.
 
-Choose **Email** and, if available, select **Only notify for failed workflows**.
+For scheduled workflows, GitHub sends workflow-run notifications to the user associated with the schedule. If another user later changes the cron expression, that user becomes the notification recipient for subsequent scheduled runs; re-enabling a disabled schedule can also change the associated recipient.
 
-This means:
-
-- normal daily check with no change → no email;
-- detected status change → failed workflow → GitHub email;
-- technical/login/site error → failed workflow → GitHub email, so you also know the monitor needs attention.
-
-GitHub's documentation notes that scheduled-workflow notifications are sent to the user associated with the schedule. In a fork, enabling the workflow yourself helps ensure the scheduled notifications belong to your account.
-
-You can also receive GitHub notifications in the GitHub mobile app or web notification inbox depending on your GitHub notification settings.
+The monitor itself does not send email and does not require an email-service API key. If you want to verify your GitHub notification setup, trigger the workflow manually and inspect the resulting Actions run and your GitHub notification channels.
 
 ## How to check a notification
 
