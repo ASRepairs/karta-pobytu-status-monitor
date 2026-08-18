@@ -65,6 +65,10 @@ jobs:
           PIO_LOGIN: ${{ secrets.PIO_LOGIN }}
           PIO_PASSWORD: ${{ secrets.PIO_PASSWORD }}
           PIO_NUMBER: ${{ secrets.PIO_NUMBER }}
+          # Optional one-time verification. If set, the workflow compares the
+          # extracted explicit status value against this secret without printing
+          # either value. Remove the secret after validation.
+          PIO_EXPECTED_STATUS: ${{ secrets.PIO_EXPECTED_STATUS }}
           # A configured private proxy has priority. Otherwise this is populated
           # only when the zero-config Tor fallback was selected. VPN Gate works
           # at the routing layer and therefore leaves this blank.
@@ -76,7 +80,11 @@ jobs:
       - name: Read result
         id: result
         shell: bash
-        run: echo "outcome=$(jq -r .outcome .pio-state/result.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "outcome=$(jq -r .outcome .pio-state/result.json)" >> "$GITHUB_OUTPUT"
+          echo "status_field_found=$(jq -r .status_field_found .pio-state/result.json)" >> "$GITHUB_OUTPUT"
+          echo "expected_status_checked=$(jq -r .expected_status_checked .pio-state/result.json)" >> "$GITHUB_OUTPUT"
+          echo "expected_status_match=$(jq -r .expected_status_match .pio-state/result.json)" >> "$GITHUB_OUTPUT"
 
       - name: Save current private fingerprint
         uses: actions/cache/save@v5
@@ -89,15 +97,22 @@ jobs:
         shell: bash
         run: |
           echo '## 🔔 Karta pobytu status changed' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Log in to Przybysz to see the new status. The monitor intentionally does not expose your case details in GitHub logs.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'A change was detected. Failing this run intentionally so GitHub can surface a failed-workflow notification.'
+          echo 'The monitor verified the explicit case status field and detected a change in that status value.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Log in to Przybysz to read the new status. The readable value is intentionally not exposed in this public repository.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'A verified status change was detected. Failing this run intentionally so GitHub can surface a failed-workflow notification.'
           exit 1
 
       - name: First-run note
         if: steps.result.outputs.outcome == 'baseline'
         run: |
-          echo '## ✅ Baseline saved' >> "$GITHUB_STEP_SUMMARY"
-          echo 'The next runs will notify you if the monitored case changes.' >> "$GITHUB_STEP_SUMMARY"
+          echo '## ✅ Strict status baseline saved' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The case, PIO number, and explicit status/stage field were all identified. Future runs compare only that explicit status value.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verification note
+        if: steps.result.outputs.expected_status_checked == 'true' && steps.result.outputs.expected_status_match == 'true'
+        run: |
+          echo '## ✅ Status extraction independently verified' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The extracted explicit status matched the temporary PIO_EXPECTED_STATUS secret. Neither value was printed.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up egress helpers
         if: always()
