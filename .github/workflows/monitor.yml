@@ -15,17 +15,18 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
+          package-manager-cache: false
 
       - name: Install dependencies
         run: npm install
@@ -34,7 +35,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Restore previous private fingerprint
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .pio-state
           key: pio-state-${{ github.repository_id }}-${{ github.run_id }}
@@ -46,6 +47,9 @@ jobs:
           PIO_LOGIN: ${{ secrets.PIO_LOGIN }}
           PIO_PASSWORD: ${{ secrets.PIO_PASSWORD }}
           PIO_NUMBER: ${{ secrets.PIO_NUMBER }}
+          PIO_PROXY_SERVER: ${{ secrets.PIO_PROXY_SERVER }}
+          PIO_PROXY_USERNAME: ${{ secrets.PIO_PROXY_USERNAME }}
+          PIO_PROXY_PASSWORD: ${{ secrets.PIO_PROXY_PASSWORD }}
         run: npm run check
 
       - name: Read result
@@ -54,7 +58,7 @@ jobs:
         run: echo "outcome=$(jq -r .outcome .pio-state/result.json)" >> "$GITHUB_OUTPUT"
 
       - name: Save current private fingerprint
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .pio-state
           key: pio-state-${{ github.repository_id }}-${{ github.run_id }}
