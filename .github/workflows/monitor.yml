@@ -3,7 +3,7 @@ name: Karta pobytu status monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 8 * * *'
+    - cron: '55 13 * * *'
       timezone: 'Europe/Warsaw'
 
 permissions:
