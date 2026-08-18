@@ -15,11 +15,11 @@ concurrency:
 
 jobs:
   monitor:
-    # Przybysz is geographically restricted to European access. GitHub-hosted
-    # runners do not provide a guaranteed European egress location, so hosted
-    # runs may require a trusted EU proxy. Advanced users can set the repository
-    # variable PIO_RUNNER to the label of a self-hosted runner located in Europe.
-    runs-on: ${{ vars.PIO_RUNNER || 'ubuntu-24.04' }}
+    # Keep macOS as the default hosted runner. GitHub does not expose a workflow
+    # setting that pins standard hosted macOS runners to a specific geographic
+    # region, so we verify the actual outbound country before sending credentials.
+    # Advanced users can set PIO_RUNNER to a European self-hosted macOS label.
+    runs-on: ${{ vars.PIO_RUNNER || 'macos-15-intel' }}
     timeout-minutes: 12
 
     steps:
@@ -36,7 +36,50 @@ jobs:
         run: npm install
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
+
+      - name: Verify European egress
+        shell: bash
+        env:
+          PIO_PROXY_SERVER: ${{ secrets.PIO_PROXY_SERVER }}
+          PIO_PROXY_USERNAME: ${{ secrets.PIO_PROXY_USERNAME }}
+          PIO_PROXY_PASSWORD: ${{ secrets.PIO_PROXY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          # Use the same outbound path that the browser will use. If a proxy is
+          # configured, verify the proxy's exit country; otherwise verify the
+          # GitHub runner's public egress. No PIO credentials are used here.
+          curl_args=(-fsS --max-time 15)
+          if [[ -n "${PIO_PROXY_SERVER:-}" ]]; then
+            curl_args+=(--proxy "$PIO_PROXY_SERVER")
+            if [[ -n "${PIO_PROXY_USERNAME:-}" || -n "${PIO_PROXY_PASSWORD:-}" ]]; then
+              curl_args+=(--proxy-user "${PIO_PROXY_USERNAME:-}:${PIO_PROXY_PASSWORD:-}")
+            fi
+          fi
+
+          trace="$(curl "${curl_args[@]}" https://1.1.1.1/cdn-cgi/trace || true)"
+          if [[ -z "$trace" ]]; then
+            trace="$(curl "${curl_args[@]}" https://www.cloudflare.com/cdn-cgi/trace || true)"
+          fi
+
+          country="$(printf '%s\n' "$trace" | awk -F= '$1 == "loc" { print toupper($2); exit }' | tr -d '\r')"
+          if [[ -z "$country" ]]; then
+            echo 'Could not verify the outbound country. Refusing to send portal credentials because European egress is required.'
+            exit 1
+          fi
+
+          europe=' AD AL AM AT AX AZ BA BE BG BY CH CY CZ DE DK EE ES FI FO FR GB GE GG GI GR HR HU IE IM IS IT JE LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS RU SE SI SJ SK SM TR UA VA XK '
+
+          echo "Detected outbound country: $country"
+          if [[ "$europe" != *" $country "* ]]; then
+            echo "Outbound traffic is not detected in Europe ($country)."
+            echo 'GitHub-hosted macOS runners cannot be pinned to a European region from workflow YAML.'
+            echo 'Configure a trusted European PIO_PROXY_SERVER or use a European self-hosted macOS runner via PIO_RUNNER.'
+            exit 1
+          fi
+
+          echo 'European egress verified.'
 
       - name: Restore previous private fingerprint
         uses: actions/cache/restore@v5
