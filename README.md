@@ -2,7 +2,7 @@
 
 Automatically checks the **Przybysz** portal of the Dolnośląski Urząd Wojewódzki (Wrocław / Lower Silesia) and notifies you when the status of your residence-permit case changes.
 
-The monitor runs in **GitHub Actions**, so your computer does not need to stay on.
+The monitor is designed to run from **GitHub Actions**, but there is one important networking requirement: **Przybysz is geographically restricted to European access**. A normal GitHub-hosted runner does not guarantee European internet egress, so reliable cloud monitoring requires either a trusted European proxy or a self-hosted GitHub runner located in Europe.
 
 > This project is unofficial and is not affiliated with the Dolnośląski Urząd Wojewódzki. It only automates the same authenticated status page that a user can normally check manually.
 
@@ -15,11 +15,46 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 - Compares it with the previous run.
 - Runs every day at **13:55 Europe/Warsaw**.
 - Uses **Node.js 24** and Node-24-compatible GitHub Actions.
-- Uses a **macOS GitHub-hosted runner** by default because repeated live tests showed the Przybysz server refusing connections from the standard Ubuntu runner network.
-- Retries transient portal failures and can retry through independently resolved IPv4 addresses if runner DNS/routing is stale.
+- Retries transient portal failures and stale DNS/IPv4 routing problems.
 - Intentionally does **not** print your residence-case details to public GitHub Actions logs.
 - On the first successful run, saves a baseline and does not notify.
 - If the case changes later, the workflow intentionally fails. GitHub records that failed run and may send an email/web notification according to the GitHub account's Actions notification preferences.
+
+## Important: European network access is required
+
+Przybysz only accepts access from Europe. Switching between Ubuntu and macOS GitHub-hosted runners does **not** solve that reliably because the hosted runner's public egress location is not something this workflow can pin to Europe.
+
+You therefore have three ways to run the monitor:
+
+### Option A — trusted European proxy
+
+Keep the default GitHub-hosted runner and add these repository secrets:
+
+- `PIO_PROXY_SERVER` — address of a proxy whose exit node is in Europe, for example `http://proxy.example:3128`;
+- `PIO_PROXY_USERNAME` — optional;
+- `PIO_PROXY_PASSWORD` — optional.
+
+The monitor passes the proxy directly to Playwright. Do **not** use random/free public proxies for an authenticated government portal.
+
+### Option B — self-hosted runner in Europe
+
+Run a GitHub Actions self-hosted runner on a computer, server, Raspberry Pi, NAS, or VPS physically/network-wise located in Europe.
+
+Then create this repository variable:
+
+**Settings → Secrets and variables → Actions → Variables → New repository variable**
+
+| Variable | Value |
+|---|---|
+| `PIO_RUNNER` | The label of your European self-hosted runner, for example `self-hosted` |
+
+The workflow uses `PIO_RUNNER` when present and otherwise falls back to `ubuntu-24.04`.
+
+Because this repository is public, be careful with self-hosted runners: do not add workflows that automatically execute untrusted pull-request code on that runner.
+
+### Option C — run locally
+
+The monitor can also be run directly on a computer in Europe using Node.js 24. This avoids GitHub's runner-location issue entirely, but you must schedule it yourself with cron, Task Scheduler, systemd, etc.
 
 ## Privacy
 
@@ -41,7 +76,7 @@ GitHub Actions caches should never be treated as a place for raw secrets. This p
 
 Click **Fork** on GitHub and create your own copy.
 
-### 2. Add the three secrets
+### 2. Add the three required secrets
 
 In your fork, open:
 
@@ -57,7 +92,13 @@ Create:
 
 Do not put these values in `README.md`, workflow files, issues, commits, or screenshots.
 
-### 3. Enable GitHub Actions
+### 3. Configure European egress
+
+Choose either the **European proxy** or **European self-hosted runner** method described above.
+
+A plain GitHub-hosted runner may return `ERR_CONNECTION_REFUSED` simply because its egress is outside Europe. That happens before authentication and does not mean your Przybysz credentials are wrong.
+
+### 4. Enable GitHub Actions
 
 Open the **Actions** tab in your fork and enable workflows if GitHub asks you to do so.
 
@@ -65,17 +106,15 @@ Then open **Karta pobytu status monitor** and click **Run workflow** once.
 
 The first successful run establishes the baseline.
 
-### 4. Notifications
+### 5. Notifications
 
 When the monitor detects a case change, it deliberately marks that workflow run as **failed**. This gives GitHub a clear failure event that can be surfaced through GitHub's normal Actions notifications.
 
 GitHub controls delivery of those notifications at the **account level**, not in this repository. Depending on your GitHub notification preferences, a failed Actions run may appear by email, on GitHub, or in GitHub Mobile.
 
-GitHub's current documentation says Actions notification preferences can be managed from the account's **Notification settings**, under **System → Actions**, where email/web delivery and a failed-workflows-only option may be available. GitHub does **not** document Actions email notifications as guaranteed to be enabled by default, so this project does not assume that every user will receive an email automatically.
+GitHub does **not** guarantee that Actions email notifications are enabled for every account, so this project does not assume that every user will receive an email automatically.
 
-For scheduled workflows, GitHub sends workflow-run notifications to the user associated with the schedule. If another user later changes the cron expression, that user becomes the notification recipient for subsequent scheduled runs; re-enabling a disabled schedule can also change the associated recipient.
-
-The monitor itself does not send email and does not require an email-service API key. If you want to verify your GitHub notification setup, trigger the workflow manually and inspect the resulting Actions run and your GitHub notification channels.
+The monitor itself does not send email and does not require an email-service API key.
 
 ## How to check a notification
 
@@ -100,29 +139,27 @@ A manual successful run updates the baseline in the same way as a scheduled run.
 A failed run can mean either:
 
 1. **the case changed**, or
-2. **the monitor could not complete** because of login failure, portal downtime, a network restriction, or a Przybysz interface change.
+2. **the monitor could not complete** because of login failure, portal downtime, geographic/network restriction, or a Przybysz interface change.
 
 Open the failed workflow. If the last failing step is **Status changed**, the monitor detected a real page change. If an earlier step failed, the automation itself needs attention.
 
+A failure such as:
+
+```text
+net::ERR_CONNECTION_REFUSED at https://pio-przybysz.duw.pl/login
+```
+
+before the login form appears is a network/egress problem, not a password failure. Make sure the runner or proxy exits in Europe.
+
 ## Portal connectivity
 
-The portal itself is currently online and is still linked by the Dolnośląski Urząd Wojewódzki. However, live workflow tests showed repeated `ERR_CONNECTION_REFUSED` responses from the standard Ubuntu GitHub-hosted runner before authentication even began.
-
-The default workflow therefore uses a **macOS GitHub-hosted runner**, which comes from a different GitHub runner network pool. This gives the monitor another egress path without sending credentials through a third-party proxy.
-
-The monitor also:
+The monitor:
 
 1. retries transient Chromium network errors;
 2. resolves the portal independently and retries through IPv4 while keeping the original HTTPS hostname, SNI, and certificate validation;
-3. reports a clear connectivity error if the runner network still cannot reach DUW.
+3. reports a specific European-egress hint if the portal still cannot be reached.
 
-For advanced cases, an optional trusted proxy can be configured with repository secrets:
-
-- `PIO_PROXY_SERVER` — for example `https://proxy.example:8443`;
-- `PIO_PROXY_USERNAME` — optional;
-- `PIO_PROXY_PASSWORD` — optional.
-
-**Do not use random/free public proxies.** A proxy used for an authenticated government portal must be one you trust. A self-hosted GitHub runner is the safer fallback if all GitHub-hosted runner networks are blocked by the portal.
+The IPv4 retry only helps DNS/routing issues. It **cannot bypass a geographic access restriction**.
 
 ## Portal compatibility
 
@@ -146,12 +183,24 @@ GitHub may disable scheduled workflows in public repositories after a long perio
 
 ## Local use
 
-You can also run it locally with Node.js 24:
+You can run it locally with Node.js 24:
 
 ```bash
 npm install
 npx playwright install chromium
 PIO_LOGIN='...' PIO_PASSWORD='...' PIO_NUMBER='...' npm run check
+```
+
+If you need a proxy locally:
+
+```bash
+PIO_PROXY_SERVER='http://eu-proxy.example:3128' \
+PIO_PROXY_USERNAME='...' \
+PIO_PROXY_PASSWORD='...' \
+PIO_LOGIN='...' \
+PIO_PASSWORD='...' \
+PIO_NUMBER='...' \
+npm run check
 ```
 
 The local state is stored under `.pio-state/` and is ignored by Git.
@@ -163,6 +212,7 @@ The local state is stored under `.pio-state/` and is ignored by Git.
 - If you accidentally publish a credential, rotate it immediately.
 - The monitor does not upload screenshots or HTML by default.
 - The monitor does not send your credentials to any third-party notification provider unless **you explicitly configure your own proxy**.
+- A self-hosted runner attached to a public repository must not be exposed to workflows that execute untrusted pull-request code.
 
 ## License
 
