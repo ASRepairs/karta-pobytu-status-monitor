@@ -2,12 +2,14 @@
 
 Automatically checks the **Przybysz** portal of the Dolnośląski Urząd Wojewódzki (Wrocław / Lower Silesia) and notifies you when the status of your residence-permit case changes.
 
-The monitor is designed to run from **GitHub Actions**, but there is one important networking requirement: **Przybysz is geographically restricted to European access**. A normal GitHub-hosted runner does not guarantee European internet egress, so reliable cloud monitoring requires either a trusted European proxy or a self-hosted GitHub runner located in Europe.
+The monitor runs from **GitHub Actions** on a **macOS runner by default**. Przybysz is geographically restricted to European access, while GitHub does not provide a workflow setting that pins a standard hosted macOS runner to a particular country or European region. The workflow therefore verifies its actual outbound country before it sends any Przybysz credentials.
 
 > This project is unofficial and is not affiliated with the Dolnośląski Urząd Wojewódzki. It only automates the same authenticated status page that a user can normally check manually.
 
 ## What it does
 
+- Runs on `macos-15-intel` by default.
+- Verifies that the browser's outbound path is detected in Europe **before** using PIO credentials.
 - Logs in to `pio-przybysz.duw.pl` with Playwright.
 - Opens **Wnioski przyjęte**.
 - Finds the configured PIO case.
@@ -22,23 +24,29 @@ The monitor is designed to run from **GitHub Actions**, but there is one importa
 
 ## Important: European network access is required
 
-Przybysz only accepts access from Europe. Switching between Ubuntu and macOS GitHub-hosted runners does **not** solve that reliably because the hosted runner's public egress location is not something this workflow can pin to Europe.
+Przybysz only accepts access from Europe.
 
-You therefore have three ways to run the monitor:
+The default workflow keeps the GitHub-hosted **macOS** runner. However, standard hosted macOS runners cannot be geographically pinned from workflow YAML. Instead, the workflow performs a preflight check of the actual public egress country.
+
+If the detected country is outside Europe, the workflow stops **before the Przybysz login step**, so your portal credentials are not sent over an unsupported route.
+
+If the macOS runner happens to have European egress, no extra configuration is needed. If it does not, use one of the following methods.
 
 ### Option A — trusted European proxy
 
-Keep the default GitHub-hosted runner and add these repository secrets:
+Keep the default macOS runner and add these repository secrets:
 
 - `PIO_PROXY_SERVER` — address of a proxy whose exit node is in Europe, for example `http://proxy.example:3128`;
 - `PIO_PROXY_USERNAME` — optional;
 - `PIO_PROXY_PASSWORD` — optional.
 
-The monitor passes the proxy directly to Playwright. Do **not** use random/free public proxies for an authenticated government portal.
+The European preflight uses the same proxy, and Playwright then uses that proxy for Przybysz as well.
 
-### Option B — self-hosted runner in Europe
+**Do not use random/free public proxies** for an authenticated government portal.
 
-Run a GitHub Actions self-hosted runner on a computer, server, Raspberry Pi, NAS, or VPS physically/network-wise located in Europe.
+### Option B — self-hosted macOS runner in Europe
+
+Run a GitHub Actions self-hosted **macOS** runner on a Mac located/networked in Europe.
 
 Then create this repository variable:
 
@@ -46,15 +54,15 @@ Then create this repository variable:
 
 | Variable | Value |
 |---|---|
-| `PIO_RUNNER` | The label of your European self-hosted runner, for example `self-hosted` |
+| `PIO_RUNNER` | The label of your European self-hosted macOS runner, for example `self-hosted` |
 
-The workflow uses `PIO_RUNNER` when present and otherwise falls back to `ubuntu-24.04`.
+The workflow uses `PIO_RUNNER` when present and otherwise falls back to `macos-15-intel`.
 
 Because this repository is public, be careful with self-hosted runners: do not add workflows that automatically execute untrusted pull-request code on that runner.
 
 ### Option C — run locally
 
-The monitor can also be run directly on a computer in Europe using Node.js 24. This avoids GitHub's runner-location issue entirely, but you must schedule it yourself with cron, Task Scheduler, systemd, etc.
+The monitor can also be run directly on a computer in Europe using Node.js 24. This avoids GitHub's runner-location issue entirely, but you must schedule it yourself with cron, Task Scheduler, launchd, etc.
 
 ## Privacy
 
@@ -92,21 +100,18 @@ Create:
 
 Do not put these values in `README.md`, workflow files, issues, commits, or screenshots.
 
-### 3. Configure European egress
-
-Choose either the **European proxy** or **European self-hosted runner** method described above.
-
-A plain GitHub-hosted runner may return `ERR_CONNECTION_REFUSED` simply because its egress is outside Europe. That happens before authentication and does not mean your Przybysz credentials are wrong.
-
-### 4. Enable GitHub Actions
+### 3. Enable GitHub Actions and run once
 
 Open the **Actions** tab in your fork and enable workflows if GitHub asks you to do so.
 
 Then open **Karta pobytu status monitor** and click **Run workflow** once.
 
-The first successful run establishes the baseline.
+The workflow first prints the detected outbound country. There are two useful outcomes:
 
-### 5. Notifications
+- **European egress verified** → the monitor continues to Przybysz and the first successful run establishes the baseline.
+- **Outbound traffic is not detected in Europe** → configure a trusted European proxy or a European self-hosted macOS runner.
+
+### 4. Notifications
 
 When the monitor detects a case change, it deliberately marks that workflow run as **failed**. This gives GitHub a clear failure event that can be surfaced through GitHub's normal Actions notifications.
 
@@ -136,12 +141,13 @@ A manual successful run updates the baseline in the same way as a scheduled run.
 
 ## What a failed run means
 
-A failed run can mean either:
+A failed run can mean:
 
-1. **the case changed**, or
-2. **the monitor could not complete** because of login failure, portal downtime, geographic/network restriction, or a Przybysz interface change.
+1. **the case changed**;
+2. **the detected outbound route is outside Europe**; or
+3. **the monitor could not complete** because of login failure, portal downtime, network restriction, or a Przybysz interface change.
 
-Open the failed workflow. If the last failing step is **Status changed**, the monitor detected a real page change. If an earlier step failed, the automation itself needs attention.
+Open the failed workflow. If the last failing step is **Status changed**, the monitor detected a real page change. If **Verify European egress** failed, the runner/proxy was not detected in Europe. If an earlier portal step failed, the automation itself needs attention.
 
 A failure such as:
 
@@ -149,15 +155,16 @@ A failure such as:
 net::ERR_CONNECTION_REFUSED at https://pio-przybysz.duw.pl/login
 ```
 
-before the login form appears is a network/egress problem, not a password failure. Make sure the runner or proxy exits in Europe.
+before the login form appears is a network/egress problem, not a password failure.
 
 ## Portal connectivity
 
 The monitor:
 
-1. retries transient Chromium network errors;
-2. resolves the portal independently and retries through IPv4 while keeping the original HTTPS hostname, SNI, and certificate validation;
-3. reports a specific European-egress hint if the portal still cannot be reached.
+1. verifies European egress before sending PIO credentials;
+2. retries transient Chromium network errors;
+3. resolves the portal independently and retries through IPv4 while keeping the original HTTPS hostname, SNI, and certificate validation;
+4. reports a specific network/egress hint if the portal still cannot be reached.
 
 The IPv4 retry only helps DNS/routing issues. It **cannot bypass a geographic access restriction**.
 
@@ -210,6 +217,7 @@ The local state is stored under `.pio-state/` and is ignored by Git.
 - Never commit portal credentials.
 - Prefer a unique password for Przybysz.
 - If you accidentally publish a credential, rotate it immediately.
+- The workflow verifies the outbound country before using Przybysz credentials.
 - The monitor does not upload screenshots or HTML by default.
 - The monitor does not send your credentials to any third-party notification provider unless **you explicitly configure your own proxy**.
 - A self-hosted runner attached to a public repository must not be exposed to workflows that execute untrusted pull-request code.
