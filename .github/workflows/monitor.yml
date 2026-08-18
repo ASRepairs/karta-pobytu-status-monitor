@@ -15,10 +15,11 @@ concurrency:
 
 jobs:
   monitor:
-    # Przybysz currently refuses TCP connections from the standard Ubuntu/Azure
-    # GitHub-hosted runner pool. macOS uses a distinct GitHub-hosted runner pool,
-    # so use it by default rather than requiring users to configure a proxy.
-    runs-on: macos-15-intel
+    # Przybysz is geographically restricted to European access. GitHub-hosted
+    # runners do not provide a guaranteed European egress location, so hosted
+    # runs may require a trusted EU proxy. Advanced users can set the repository
+    # variable PIO_RUNNER to the label of a self-hosted runner located in Europe.
+    runs-on: ${{ vars.PIO_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 12
 
     steps:
@@ -35,7 +36,7 @@ jobs:
         run: npm install
 
       - name: Install Chromium
-        run: npx playwright install chromium
+        run: npx playwright install --with-deps chromium
 
       - name: Restore previous private fingerprint
         uses: actions/cache/restore@v5
