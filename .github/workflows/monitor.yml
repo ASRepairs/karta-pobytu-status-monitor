@@ -1,0 +1,76 @@
+name: Karta pobytu status monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * *'
+      timezone: 'Europe/Warsaw'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: karta-pobytu-status-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Restore previous private fingerprint
+        uses: actions/cache/restore@v4
+        with:
+          path: .pio-state
+          key: pio-state-${{ github.repository_id }}-${{ github.run_id }}
+          restore-keys: |
+            pio-state-${{ github.repository_id }}-
+
+      - name: Check Przybysz
+        env:
+          PIO_LOGIN: ${{ secrets.PIO_LOGIN }}
+          PIO_PASSWORD: ${{ secrets.PIO_PASSWORD }}
+          PIO_NUMBER: ${{ secrets.PIO_NUMBER }}
+        run: npm run check
+
+      - name: Read result
+        id: result
+        shell: bash
+        run: echo "outcome=$(jq -r .outcome .pio-state/result.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Save current private fingerprint
+        uses: actions/cache/save@v4
+        with:
+          path: .pio-state
+          key: pio-state-${{ github.repository_id }}-${{ github.run_id }}
+
+      - name: Status changed
+        if: steps.result.outputs.outcome == 'changed'
+        shell: bash
+        run: |
+          echo '## 🔔 Karta pobytu status changed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Log in to Przybysz to see the new status. The monitor intentionally does not expose your case details in GitHub logs.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'A change was detected. Failing this run intentionally so GitHub can send a failed-workflow email notification.'
+          exit 1
+
+      - name: First-run note
+        if: steps.result.outputs.outcome == 'baseline'
+        run: |
+          echo '## ✅ Baseline saved' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The next runs will notify you if the monitored case changes.' >> "$GITHUB_STEP_SUMMARY"
