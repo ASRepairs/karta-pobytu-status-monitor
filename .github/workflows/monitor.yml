@@ -33,15 +33,66 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright Chromium
+        # Do not use --with-deps here. GitHub's Ubuntu 24.04 image already has
+        # the browser runtime libraries, while --with-deps runs apt-get and can
+        # stall on a transient Ubuntu/Azure mirror. We only need Playwright's
+        # matching Chromium binary.
+        timeout-minutes: 5
+        run: npx playwright install chromium
 
       - name: Install automatic egress tools
+        id: egress_tools
+        shell: bash
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tor openvpn
+          set +e
+
+          if command -v tor >/dev/null 2>&1 && command -v openvpn >/dev/null 2>&1; then
+            echo 'Tor and OpenVPN are already available.'
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo 'Installing Tor and OpenVPN with bounded apt timeouts…'
+
+          # Hosted runners normally point at an Azure Ubuntu mirror. If that
+          # mirror is unhealthy, prefer Ubuntu's public archive instead of
+          # letting apt retry the Azure endpoint for most of the job lifetime.
+          sudo sed -i \
+            's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|https://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+
+          sudo timeout 120s apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=10 \
+            -o Acquire::https::Timeout=10 \
+            update
+          update_rc=$?
+
+          sudo timeout 120s apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=10 \
+            -o Acquire::https::Timeout=10 \
+            install -y --no-install-recommends tor openvpn
+          install_rc=$?
+
+          if command -v tor >/dev/null 2>&1 && command -v openvpn >/dev/null 2>&1; then
+            echo 'Automatic egress tools installed.'
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not install automatic egress tools in the bounded setup window (apt update rc=${update_rc}, install rc=${install_rc})."
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            echo '### ⏭️ Status check skipped' >> "$GITHUB_STEP_SUMMARY"
+            echo 'The runner package mirror did not provide Tor/OpenVPN in time. No case-status conclusion was made and this infrastructure problem is intentionally not treated as a status-change alert.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Package-mirror trouble is an infrastructure condition, not evidence
+          # about the residence case, so this setup step itself stays green.
+          exit 0
 
       - name: Prepare European egress
+        if: steps.egress_tools.outputs.available == 'true'
         id: egress
         shell: bash
         env:
@@ -53,14 +104,14 @@ jobs:
         run: bash scripts/prepare-eu-egress.sh
 
       - name: No European route available
-        if: steps.egress.outputs.available != 'true'
+        if: steps.egress_tools.outputs.available != 'true' || steps.egress.outputs.available != 'true'
         shell: bash
         run: |
-          echo 'The portal check was skipped because no usable European route was available after the automatic retries.'
-          echo 'This is intentionally a successful workflow run: relay availability is not evidence of a residence-case status change.'
+          echo 'The portal check was skipped because the runner could not prepare a usable European route.'
+          echo 'This is intentionally a successful workflow run: runner/package/relay availability is not evidence of a residence-case status change.'
 
       - name: Restore previous private fingerprint
-        if: steps.egress.outputs.available == 'true'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true'
         uses: actions/cache/restore@v5
         with:
           path: .pio-state
@@ -69,7 +120,7 @@ jobs:
             pio-state-${{ github.repository_id }}-
 
       - name: Check Przybysz
-        if: steps.egress.outputs.available == 'true'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true'
         env:
           PIO_LOGIN: ${{ secrets.PIO_LOGIN }}
           PIO_PASSWORD: ${{ secrets.PIO_PASSWORD }}
@@ -87,7 +138,7 @@ jobs:
         run: npm run check
 
       - name: Read result
-        if: steps.egress.outputs.available == 'true'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true'
         id: result
         shell: bash
         run: |
@@ -97,14 +148,14 @@ jobs:
           echo "expected_status_match=$(jq -r .expected_status_match .pio-state/result.json)" >> "$GITHUB_OUTPUT"
 
       - name: Save current private fingerprint
-        if: steps.egress.outputs.available == 'true'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true'
         uses: actions/cache/save@v5
         with:
           path: .pio-state
           key: pio-state-${{ github.repository_id }}-${{ github.run_id }}
 
       - name: Status changed
-        if: steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'changed'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'changed'
         shell: bash
         run: |
           echo '## 🔔 Karta pobytu status changed' >> "$GITHUB_STEP_SUMMARY"
@@ -114,13 +165,13 @@ jobs:
           exit 1
 
       - name: First-run note
-        if: steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'baseline'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'baseline'
         run: |
           echo '## ✅ Strict status baseline saved' >> "$GITHUB_STEP_SUMMARY"
           echo 'The case, PIO number, and explicit status/stage field were all identified. Future runs compare only that explicit status value.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verification note
-        if: steps.egress.outputs.available == 'true' && steps.result.outputs.expected_status_checked == 'true' && steps.result.outputs.expected_status_match == 'true'
+        if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true' && steps.result.outputs.expected_status_checked == 'true' && steps.result.outputs.expected_status_match == 'true'
         run: |
           echo '## ✅ Status extraction independently verified' >> "$GITHUB_STEP_SUMMARY"
           echo 'The extracted explicit status matched the temporary PIO_EXPECTED_STATUS secret. Neither value was printed.' >> "$GITHUB_STEP_SUMMARY"
