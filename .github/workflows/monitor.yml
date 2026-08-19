@@ -18,7 +18,7 @@ jobs:
     # Linux is used because it lets the workflow create an automatic European
     # egress path without asking every fork owner to configure a VPN account.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -52,7 +52,15 @@ jobs:
           PIO_PROXY_PASSWORD: ${{ secrets.PIO_PROXY_PASSWORD }}
         run: bash scripts/prepare-eu-egress.sh
 
+      - name: No European route available
+        if: steps.egress.outputs.available != 'true'
+        shell: bash
+        run: |
+          echo 'The portal check was skipped because no usable European route was available after the automatic retries.'
+          echo 'This is intentionally a successful workflow run: relay availability is not evidence of a residence-case status change.'
+
       - name: Restore previous private fingerprint
+        if: steps.egress.outputs.available == 'true'
         uses: actions/cache/restore@v5
         with:
           path: .pio-state
@@ -61,6 +69,7 @@ jobs:
             pio-state-${{ github.repository_id }}-
 
       - name: Check Przybysz
+        if: steps.egress.outputs.available == 'true'
         env:
           PIO_LOGIN: ${{ secrets.PIO_LOGIN }}
           PIO_PASSWORD: ${{ secrets.PIO_PASSWORD }}
@@ -69,15 +78,16 @@ jobs:
           # extracted explicit status value against this secret without printing
           # either value. Remove the secret after validation.
           PIO_EXPECTED_STATUS: ${{ secrets.PIO_EXPECTED_STATUS }}
-          # A configured private proxy has priority. Otherwise this is populated
-          # only when the zero-config Tor fallback was selected. VPN Gate works
-          # at the routing layer and therefore leaves this blank.
-          PIO_PROXY_SERVER: ${{ secrets.PIO_PROXY_SERVER || steps.egress.outputs.proxy }}
-          PIO_PROXY_USERNAME: ${{ secrets.PIO_PROXY_USERNAME }}
-          PIO_PROXY_PASSWORD: ${{ secrets.PIO_PROXY_PASSWORD }}
+          # Use the configured private proxy only if the egress preflight proved
+          # that exact proxy works. Otherwise use the automatically selected Tor
+          # proxy; VPN Gate and direct modes operate at the routing layer.
+          PIO_PROXY_SERVER: ${{ steps.egress.outputs.mode == 'custom-proxy' && secrets.PIO_PROXY_SERVER || steps.egress.outputs.proxy }}
+          PIO_PROXY_USERNAME: ${{ steps.egress.outputs.mode == 'custom-proxy' && secrets.PIO_PROXY_USERNAME || '' }}
+          PIO_PROXY_PASSWORD: ${{ steps.egress.outputs.mode == 'custom-proxy' && secrets.PIO_PROXY_PASSWORD || '' }}
         run: npm run check
 
       - name: Read result
+        if: steps.egress.outputs.available == 'true'
         id: result
         shell: bash
         run: |
@@ -87,13 +97,14 @@ jobs:
           echo "expected_status_match=$(jq -r .expected_status_match .pio-state/result.json)" >> "$GITHUB_OUTPUT"
 
       - name: Save current private fingerprint
+        if: steps.egress.outputs.available == 'true'
         uses: actions/cache/save@v5
         with:
           path: .pio-state
           key: pio-state-${{ github.repository_id }}-${{ github.run_id }}
 
       - name: Status changed
-        if: steps.result.outputs.outcome == 'changed'
+        if: steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'changed'
         shell: bash
         run: |
           echo '## 🔔 Karta pobytu status changed' >> "$GITHUB_STEP_SUMMARY"
@@ -103,13 +114,13 @@ jobs:
           exit 1
 
       - name: First-run note
-        if: steps.result.outputs.outcome == 'baseline'
+        if: steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'baseline'
         run: |
           echo '## ✅ Strict status baseline saved' >> "$GITHUB_STEP_SUMMARY"
           echo 'The case, PIO number, and explicit status/stage field were all identified. Future runs compare only that explicit status value.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verification note
-        if: steps.result.outputs.expected_status_checked == 'true' && steps.result.outputs.expected_status_match == 'true'
+        if: steps.egress.outputs.available == 'true' && steps.result.outputs.expected_status_checked == 'true' && steps.result.outputs.expected_status_match == 'true'
         run: |
           echo '## ✅ Status extraction independently verified' >> "$GITHUB_STEP_SUMMARY"
           echo 'The extracted explicit status matched the temporary PIO_EXPECTED_STATUS secret. Neither value was printed.' >> "$GITHUB_STEP_SUMMARY"
