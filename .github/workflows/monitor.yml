@@ -33,13 +33,13 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Playwright Chromium
+      - name: Install Playwright headless Chromium
         # Do not use --with-deps here. GitHub's Ubuntu 24.04 image already has
         # the browser runtime libraries, while --with-deps runs apt-get and can
-        # stall on a transient Ubuntu/Azure mirror. We only need Playwright's
-        # matching Chromium binary.
+        # stall on a transient Ubuntu/Azure mirror. This monitor is headless, so
+        # only Playwright's matching Chromium headless shell is required.
         timeout-minutes: 5
-        run: npx playwright install chromium
+        run: npx playwright install --only-shell chromium
 
       - name: Install automatic egress tools
         id: egress_tools
