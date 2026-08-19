@@ -211,10 +211,10 @@ npx playwright install chromium
 PIO_LOGIN='...' PIO_PASSWORD='...' PIO_NUMBER='...' npm run check
 ```
 
-Or using the application acceptance date instead:
+Or using the application acceptance date instead (replace the placeholder with the exact date shown in the portal):
 
 ```bash
-PIO_LOGIN='...' PIO_PASSWORD='...' PIO_DATE='15.04.2025' npm run check
+PIO_LOGIN='...' PIO_PASSWORD='...' PIO_DATE='DD.MM.YYYY' npm run check
 ```
 
 For a one-time strict local verification, add `PIO_EXPECTED_STATUS` to either form, for example:
@@ -223,7 +223,7 @@ For a one-time strict local verification, add `PIO_EXPECTED_STATUS` to either fo
 PIO_EXPECTED_STATUS='the status you currently see' \
 PIO_LOGIN='...' \
 PIO_PASSWORD='...' \
-PIO_DATE='15.04.2025' \
+PIO_DATE='DD.MM.YYYY' \
 npm run check
 ```
 
