@@ -2,7 +2,7 @@
 
 Automatically checks the **Przybysz** portal of the Dolnośląski Urząd Wojewódzki and detects changes to the explicit status/stage of a residence-permit case.
 
-The monitor runs in **GitHub Actions**, so your computer does not need to stay on. Przybysz is geographically restricted to European access, but the default workflow automatically prepares a working European route before portal credentials are used.
+The monitor runs in **GitHub Actions**, so your computer does not need to stay on. Przybysz is geographically restricted to European access, so the default workflow automatically prepares a European route before portal credentials are used. If no usable route is temporarily available, the check is skipped rather than being reported as a failed workflow.
 
 > This project is unofficial and is not affiliated with the Dolnośląski Urząd Wojewódzki. It automates the same authenticated portal that a user can check manually.
 
@@ -10,11 +10,13 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 
 - Runs every day at **13:55 Europe/Warsaw**.
 - Automatically prepares European connectivity when direct GitHub-runner access is rejected.
+- Retries transient European-relay shortages with fresh Tor/VPN Gate selections.
+- If no European route works after the retry rounds, records a neutral **skipped check** and leaves the workflow successful so relay availability cannot create a false status-change alarm.
 - Logs in to `pio-przybysz.duw.pl` with Playwright.
 - Opens **Wnioski przyjęte**.
-- Finds the configured PIO case.
-- Requires an explicit status/stage field such as **Etap realizacji**, **Status sprawy**, **Etap sprawy**, or **Stan sprawy**.
-- Refuses to save a baseline if it finds the case but cannot identify an explicit status field.
+- Finds the configured PIO case and follows its `/szczegoly-wniosku/...` details link.
+- Reads the explicit **Etap realizacji** row from the application's details table.
+- Refuses to save a baseline if it cannot positively identify the configured case and its explicit status field.
 - Stores only a keyed HMAC fingerprint of the normalized status value.
 - Compares that explicit status value on future runs.
 - Does **not** print the readable status, PIO number, password, or authenticated page contents to public Actions logs.
@@ -28,7 +30,11 @@ It tries, in order:
 
 1. **Direct GitHub runner access**.
 2. **European Tor exit** if direct access fails.
-3. **European VPN Gate/OpenVPN relay** as the final automatic fallback.
+3. **European VPN Gate/OpenVPN relay** if Tor fails.
+
+Because public relays are transient, the automatic fallback performs multiple rounds. Each round starts a fresh Tor circuit and re-fetches VPN Gate's live European relay list. The default is **3 rounds**, with a short delay between failed rounds.
+
+If none of those routes can reach Przybysz after the retries, the workflow sets the egress result to unavailable, skips the authenticated monitor steps, leaves the existing status fingerprint untouched, and finishes successfully. **No status conclusion is made on a skipped run.**
 
 No VPN account, VPS, proxy, or self-hosted runner is required for the default setup.
 
@@ -73,17 +79,20 @@ Open **Actions → Karta pobytu status monitor → Run workflow**.
 A successful strict run prints structural confirmation only, for example:
 
 ```text
+Authenticated portal shell detected.
+Opening accepted applications…
+Opening configured case details…
+Configured PIO link found: yes
 Case found: yes
-PIO matched: yes
-Status field found: yes
-Status field: Etap realizacji
+PIO matched exactly: yes
+Details view opened: yes
+Status field found: Etap realizacji
 Status fingerprint saved: yes
-Strict status baseline saved. Future checks will compare the explicit status value only.
 ```
 
 The readable status itself is intentionally not printed.
 
-The first successful strict run creates the baseline. If you used an older version of this project that fingerprinted a broader case block, the first run after upgrading establishes a new version-2 strict-status baseline instead of producing a false alert.
+The first successful strict run creates the baseline. If the workflow cannot obtain a European route, that run is merely skipped and does **not** create or replace the baseline.
 
 ## One-time strict verification
 
@@ -103,11 +112,7 @@ Expected status match: yes
 
 and the job summary confirms that extraction was independently verified.
 
-If the values do not match, the workflow fails with:
-
-```text
-Strict verification failed: the extracted status does not match PIO_EXPECTED_STATUS.
-```
+If the values do not match, the workflow fails with a strict-verification error. Verification happens before the state is written, so a parser mistake cannot replace the trusted baseline.
 
 Delete `PIO_EXPECTED_STATUS` after successful validation. It is not required for normal daily monitoring.
 
@@ -126,18 +131,22 @@ It does not store readable page HTML, screenshots, the PIO number, or the readab
 
 Because the fingerprint is keyed using the Przybysz password, changing that password changes the fingerprint key.
 
+A skipped connectivity run does not save a new cache state and therefore cannot alter the last known fingerprint.
+
 ## Notifications
 
 When an explicit status change is detected, the monitor intentionally marks that run as **failed**. GitHub may surface the failed run through email, GitHub notifications, or GitHub Mobile according to the account's notification preferences.
 
 The project itself does **not** send email and does not assume that email notifications are enabled for every account.
 
-A failed run can mean either:
+A temporary inability to obtain European egress is **not** treated as a failure. After the automatic retry rounds, the check is skipped and the workflow stays green because lack of a working relay says nothing about the case status.
+
+A failed run can still mean:
 
 - the verified case status changed; or
-- the monitor could not complete because of connectivity, authentication, or a portal-layout change.
+- after a usable route was established, the monitor encountered a genuine authentication, portal-layout, or other technical error.
 
-If the last failing step is **Status changed**, a verified explicit-status change was detected. If an earlier step failed, inspect that step instead.
+If the last failing step is **Status changed**, a verified explicit-status change was detected. If an earlier authenticated-monitor step failed, inspect that step instead.
 
 ## How the VPN Gate fallback is constrained
 
@@ -145,6 +154,7 @@ The automatic VPN Gate helper:
 
 - filters the live relay list to European countries;
 - tries multiple candidates because volunteer relays can disappear;
+- is invoked again on later automatic rounds so the live relay list is refreshed;
 - strips OpenVPN directives that could execute hooks or replace the runner's default route;
 - forces `script-security 1`;
 - uses `route-nopull`;
@@ -157,7 +167,9 @@ This is a last-resort connectivity fallback, not a claim that a volunteer VPN re
 
 This project currently targets the Przybysz portal used by the **Dolnośląski Urząd Wojewódzki**. Other voivodeships may use different systems.
 
-The scraper deliberately **fails closed**: if it cannot identify both the configured case and an explicit status/stage field, it does not silently treat nearby case text as a valid status.
+The scraper deliberately **fails closed on status extraction**: if it cannot identify both the configured case and its explicit status field after authenticated access succeeds, it does not silently treat nearby text as a valid status.
+
+European egress availability is handled differently: an inability to obtain a route after retries is treated as a **neutral skipped check**, because failing the workflow for that condition could look like a status-change notification even though the case was never checked.
 
 If the portal changes, open an issue describing the failure, but **never post passwords, PIO numbers, PESEL numbers, passport details, or authenticated screenshots** in a public issue.
 
