@@ -124,7 +124,10 @@ jobs:
         env:
           PIO_LOGIN: ${{ secrets.PIO_LOGIN }}
           PIO_PASSWORD: ${{ secrets.PIO_PASSWORD }}
+          # Configure either PIO_NUMBER or PIO_DATE. If both are set, PIO_NUMBER
+          # is preferred. PIO_DATE uses the DD.MM.YYYY date shown in Wnioski przyjęte.
           PIO_NUMBER: ${{ secrets.PIO_NUMBER }}
+          PIO_DATE: ${{ secrets.PIO_DATE }}
           # Optional one-time verification. If set, the workflow compares the
           # extracted explicit status value against this secret without printing
           # either value. Remove the secret after validation.
@@ -168,7 +171,7 @@ jobs:
         if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true' && steps.result.outputs.outcome == 'baseline'
         run: |
           echo '## ✅ Strict status baseline saved' >> "$GITHUB_STEP_SUMMARY"
-          echo 'The case, PIO number, and explicit status/stage field were all identified. Future runs compare only that explicit status value.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'The case identifier and explicit status/stage field were identified. Future runs compare only that explicit status value.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verification note
         if: steps.egress_tools.outputs.available == 'true' && steps.egress.outputs.available == 'true' && steps.result.outputs.expected_status_checked == 'true' && steps.result.outputs.expected_status_match == 'true'
