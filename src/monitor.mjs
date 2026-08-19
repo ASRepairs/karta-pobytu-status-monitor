@@ -7,7 +7,8 @@ import path from 'node:path';
 const BASE_URL = (process.env.PIO_BASE_URL || 'https://pio-przybysz.duw.pl').replace(/\/$/, '');
 const LOGIN = process.env.PIO_LOGIN;
 const PASSWORD = process.env.PIO_PASSWORD;
-const PIO_NUMBER = process.env.PIO_NUMBER;
+const PIO_NUMBER = (process.env.PIO_NUMBER || '').trim();
+const PIO_DATE = (process.env.PIO_DATE || '').trim();
 const EXPECTED_STATUS = process.env.PIO_EXPECTED_STATUS || '';
 const STATE_DIR = process.env.PIO_STATE_DIR || '.pio-state';
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
@@ -18,9 +19,22 @@ const PROXY_SERVER = process.env.PIO_PROXY_SERVER || '';
 const PROXY_USERNAME = process.env.PIO_PROXY_USERNAME || '';
 const PROXY_PASSWORD = process.env.PIO_PROXY_PASSWORD || '';
 
-for (const [name, value] of Object.entries({ PIO_LOGIN: LOGIN, PIO_PASSWORD: PASSWORD, PIO_NUMBER })) {
+for (const [name, value] of Object.entries({ PIO_LOGIN: LOGIN, PIO_PASSWORD: PASSWORD })) {
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
 }
+
+if (!PIO_NUMBER && !PIO_DATE) {
+  throw new Error('Set either PIO_NUMBER or PIO_DATE to identify the case to monitor.');
+}
+if (PIO_DATE && !/^\d{2}\.\d{2}\.\d{4}$/.test(PIO_DATE)) {
+  throw new Error('PIO_DATE must use the DD.MM.YYYY format shown in Wnioski przyjęte.');
+}
+
+// PIO number remains the preferred identifier when both are configured. Date
+// is an alternative for users who do not want to store the PIO number.
+const CASE_IDENTIFIER_TYPE = PIO_NUMBER ? 'pio' : 'date';
+const CASE_IDENTIFIER_VALUE = PIO_NUMBER || PIO_DATE;
+const CASE_IDENTIFIER_LABEL = CASE_IDENTIFIER_TYPE === 'pio' ? 'PIO number' : 'application date';
 
 fs.mkdirSync(STATE_DIR, { recursive: true });
 
@@ -295,8 +309,8 @@ async function waitForAcceptedApplicationsList(page, timeoutMs = 25000) {
 
 async function openAcceptedApplications(page) {
   // Prefer the authenticated SPA menu. The live portal renders this page as
-  // <app-applications-submitted> and each case number links to
-  // /szczegoly-wniosku/<internal-id>.
+  // <app-applications-submitted>; the case number and acceptance date both link
+  // to /szczegoly-wniosku/<internal-id>.
   const navCandidates = [
     page.getByRole('link', { name: /wnioski\s+przyjęte/i }).first(),
     page.getByRole('button', { name: /wnioski\s+przyjęte/i }).first(),
@@ -328,6 +342,7 @@ async function findConfiguredCaseLink(page, timeoutMs = 30000) {
   while (Date.now() - started < timeoutMs) {
     const links = submitted.locator('a[href^="/szczegoly-wniosku/"]');
     const count = await links.count();
+    const matches = new Map();
 
     for (let i = 0; i < count; i += 1) {
       const link = links.nth(i);
@@ -338,9 +353,21 @@ async function findConfiguredCaseLink(page, timeoutMs = 30000) {
         href = (await link.getAttribute('href')) || '';
       } catch {}
 
-      if (text === PIO_NUMBER && /^\/szczegoly-wniosku\/[^/?#]+\/?(?:[?#].*)?$/i.test(href)) {
-        return { link, href };
+      if (text !== CASE_IDENTIFIER_VALUE) continue;
+      if (!/^\/szczegoly-wniosku\/[^/?#]+\/?(?:[?#].*)?$/i.test(href)) continue;
+      if (!matches.has(href)) matches.set(href, link);
+    }
+
+    if (matches.size === 1) {
+      const [href, link] = matches.entries().next().value;
+      return { link, href };
+    }
+
+    if (matches.size > 1) {
+      if (CASE_IDENTIFIER_TYPE === 'date') {
+        throw new Error('PIO_DATE matches more than one application. Use PIO_NUMBER to identify the case unambiguously.');
       }
+      throw new Error('The configured PIO number unexpectedly matches more than one application link.');
     }
 
     await page.waitForTimeout(500);
@@ -356,15 +383,14 @@ async function openConfiguredCaseDetails(page) {
   console.log('Opening configured case details…');
   const match = await findConfiguredCaseLink(page);
   if (!match) {
-    throw new Error('The configured PIO number was not found among the Wnioski przyjęte case links.');
+    throw new Error(`The configured ${CASE_IDENTIFIER_LABEL} was not found among the Wnioski przyjęte case links.`);
   }
 
-  console.log('Configured PIO link found: yes');
+  console.log(`Configured case link found via ${CASE_IDENTIFIER_LABEL}: yes`);
 
   // Navigate to the exact href emitted by the portal instead of depending on
-  // Playwright text visibility. The live DOM uses:
-  // <a href="/szczegoly-wniosku/<id>">PIO_NUMBER</a>.
-  // Using that href also avoids ambiguity if responsive CSS creates hidden cells.
+  // Playwright text visibility. Both the PIO number and the application date
+  // are anchors pointing at the same /szczegoly-wniosku/<id> details route.
   const detailsUrl = new URL(match.href, `${BASE_URL}/`).toString();
   await gotoWithRetry(page, detailsUrl, 2);
 
@@ -373,19 +399,19 @@ async function openConfiguredCaseDetails(page) {
     await details.waitFor({ state: 'attached', timeout: 25000 });
     await details.locator('table').first().waitFor({ state: 'visible', timeout: 20000 });
   } catch {
-    throw new Error('The configured PIO link was found, but its application details table did not open.');
+    throw new Error('The configured case link was found, but its application details table did not open.');
   }
 }
 
 async function extractStatusFromDetailsTable(page) {
   const details = page.locator('app-applications-details').first();
   if (!(await details.count())) {
-    throw new Error('Application details component was not found after opening the configured PIO.');
+    throw new Error('Application details component was not found after opening the configured case.');
   }
 
   const detailText = normalizeText(await details.innerText());
-  if (!detailText.includes(PIO_NUMBER)) {
-    throw new Error('The opened details view does not contain the configured PIO number. Refusing to monitor the wrong case.');
+  if (!detailText.includes(CASE_IDENTIFIER_VALUE)) {
+    throw new Error(`The opened details view does not contain the configured ${CASE_IDENTIFIER_LABEL}. Refusing to monitor the wrong case.`);
   }
 
   // Exact DOM structure observed in Przybysz:
@@ -446,8 +472,11 @@ function writeResult({ outcome, statusFingerprint, expectedStatusChecked, expect
       version: 2,
       outcome,
       case_found: true,
-      pio_matched: true,
-      pio_matched_exactly: true,
+      case_identifier_type: CASE_IDENTIFIER_TYPE,
+      case_identifier_matched: true,
+      pio_matched: CASE_IDENTIFIER_TYPE === 'pio' ? true : null,
+      pio_matched_exactly: CASE_IDENTIFIER_TYPE === 'pio' ? true : null,
+      application_date_matched: CASE_IDENTIFIER_TYPE === 'date' ? true : null,
       details_view_opened: true,
       status_field_found: true,
       status_fingerprint_saved: true,
@@ -489,7 +518,7 @@ try {
   // Verify before writing state, so a parser mistake cannot replace the trusted baseline.
   if (expectedStatusChecked && !expectedStatusMatch) {
     console.log('Case found: yes');
-    console.log('PIO matched exactly: yes');
+    console.log(`Case identifier matched (${CASE_IDENTIFIER_LABEL}): yes`);
     console.log('Details view opened: yes');
     console.log(`Status field found: ${statusField}`);
     console.log('Expected status match: no');
@@ -504,7 +533,7 @@ try {
   });
 
   console.log('Case found: yes');
-  console.log('PIO matched exactly: yes');
+  console.log(`Case identifier matched (${CASE_IDENTIFIER_LABEL}): yes`);
   console.log('Details view opened: yes');
   console.log(`Status field found: ${statusField}`);
   console.log('Status fingerprint saved: yes');
