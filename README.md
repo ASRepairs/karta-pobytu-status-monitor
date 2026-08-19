@@ -14,17 +14,17 @@ The monitor runs in **GitHub Actions**, so your computer does not need to stay o
 - If no European route works after the retry rounds, records a neutral **skipped check** and leaves the workflow successful so relay availability cannot create a false status-change alarm.
 - Logs in to `pio-przybysz.duw.pl` with Playwright.
 - Opens **Wnioski przyjęte**.
-- Finds the configured PIO case and follows its `/szczegoly-wniosku/...` details link.
+- Finds the configured case by either its **PIO number** or its **application acceptance date** and follows the matching `/szczegoly-wniosku/...` details link.
 - Reads the explicit **Etap realizacji** row from the application's details table.
 - Refuses to save a baseline if it cannot positively identify the configured case and its explicit status field.
 - Stores only a keyed HMAC fingerprint of the normalized status value.
 - Compares that explicit status value on future runs.
-- Does **not** print the readable status, PIO number, password, or authenticated page contents to public Actions logs.
+- Does **not** print the readable status, configured case identifier, password, or authenticated page contents to public Actions logs.
 - Deliberately fails the workflow when a verified status change is detected so GitHub can surface a failed-run notification according to the user's GitHub notification settings.
 
 ## Zero-configuration European routing
 
-The workflow prepares connectivity **before** the step that receives `PIO_LOGIN`, `PIO_PASSWORD`, or `PIO_NUMBER`.
+The workflow prepares connectivity **before** the step that receives `PIO_LOGIN`, `PIO_PASSWORD`, `PIO_NUMBER`, or `PIO_DATE`.
 
 It tries, in order:
 
@@ -68,7 +68,14 @@ Create:
 |---|---|
 | `PIO_LOGIN` | Your Przybysz login/access code |
 | `PIO_PASSWORD` | Your Przybysz password |
-| `PIO_NUMBER` | The PIO number of the case you want to monitor |
+| `PIO_NUMBER` | Optional if `PIO_DATE` is set. The PIO number of the case you want to monitor. |
+| `PIO_DATE` | Optional if `PIO_NUMBER` is set. The application acceptance date exactly as shown in **Wnioski przyjęte**, using `DD.MM.YYYY`. |
+
+You must configure **either `PIO_NUMBER` or `PIO_DATE`**. You do not need to enter or store your PIO number if you prefer to identify the case by its application acceptance date.
+
+On **Wnioski przyjęte**, both the PIO number and the acceptance date are clickable links to the same case details page, so the monitor can use either one. If both secrets are set, `PIO_NUMBER` is preferred.
+
+If the same acceptance date matches more than one application in your account, the monitor refuses to guess and asks you to use `PIO_NUMBER` instead.
 
 Never put these values in commits, issues, screenshots, workflow files, or this README.
 
@@ -76,21 +83,28 @@ Never put these values in commits, issues, screenshots, workflow files, or this 
 
 Open **Actions → Karta pobytu status monitor → Run workflow**.
 
-A successful strict run prints structural confirmation only, for example:
+A successful strict run prints structural confirmation only, for example when using a PIO number:
 
 ```text
 Authenticated portal shell detected.
 Opening accepted applications…
 Opening configured case details…
-Configured PIO link found: yes
+Configured case link found via PIO number: yes
 Case found: yes
-PIO matched exactly: yes
+Case identifier matched (PIO number): yes
 Details view opened: yes
 Status field found: Etap realizacji
 Status fingerprint saved: yes
 ```
 
-The readable status itself is intentionally not printed.
+When using `PIO_DATE`, the corresponding lines say:
+
+```text
+Configured case link found via application date: yes
+Case identifier matched (application date): yes
+```
+
+The readable status and configured identifier value are intentionally not printed.
 
 The first successful strict run creates the baseline. If the workflow cannot obtain a European route, that run is merely skipped and does **not** create or replace the baseline.
 
@@ -127,7 +141,7 @@ The private Actions cache contains only a structure similar to:
 }
 ```
 
-It does not store readable page HTML, screenshots, the PIO number, or the readable status.
+It does not store readable page HTML, screenshots, the PIO number, the application date, or the readable status.
 
 Because the fingerprint is keyed using the Przybysz password, changing that password changes the fingerprint key.
 
@@ -171,7 +185,7 @@ The scraper deliberately **fails closed on status extraction**: if it cannot ide
 
 European egress availability is handled differently: an inability to obtain a route after retries is treated as a **neutral skipped check**, because failing the workflow for that condition could look like a status-change notification even though the case was never checked.
 
-If the portal changes, open an issue describing the failure, but **never post passwords, PIO numbers, PESEL numbers, passport details, or authenticated screenshots** in a public issue.
+If the portal changes, open an issue describing the failure, but **never post passwords, PIO numbers, application dates used as identifiers, PESEL numbers, passport details, or authenticated screenshots** in a public issue.
 
 ## Schedule
 
@@ -189,19 +203,27 @@ GitHub can delay scheduled jobs during periods of high load. Public-repository s
 
 Node.js 24 is recommended.
 
+Using the PIO number:
+
 ```bash
 npm install
 npx playwright install chromium
 PIO_LOGIN='...' PIO_PASSWORD='...' PIO_NUMBER='...' npm run check
 ```
 
-For a one-time strict local verification:
+Or using the application acceptance date instead:
+
+```bash
+PIO_LOGIN='...' PIO_PASSWORD='...' PIO_DATE='15.04.2025' npm run check
+```
+
+For a one-time strict local verification, add `PIO_EXPECTED_STATUS` to either form, for example:
 
 ```bash
 PIO_EXPECTED_STATUS='the status you currently see' \
 PIO_LOGIN='...' \
 PIO_PASSWORD='...' \
-PIO_NUMBER='...' \
+PIO_DATE='15.04.2025' \
 npm run check
 ```
 
@@ -209,10 +231,10 @@ Local state is stored under `.pio-state/` and is ignored by Git.
 
 ## Security notes
 
-- Never commit portal credentials.
+- Never commit portal credentials or case identifiers.
 - Prefer a unique password for Przybysz.
 - Rotate a credential immediately if it is exposed.
-- PIO credentials are not provided to the automatic egress-preparation step.
+- PIO credentials and case identifiers are not provided to the automatic egress-preparation step.
 - Authenticated page contents are not intentionally logged.
 - The monitor does not upload screenshots or HTML by default.
 - HTTPS certificate validation remains enabled.
