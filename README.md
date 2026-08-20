@@ -187,6 +187,96 @@ European egress availability is handled differently: an inability to obtain a ro
 
 If the portal changes, open an issue describing the failure, but **never post passwords, PIO numbers, application dates used as identifiers, PESEL numbers, passport details, or authenticated screenshots** in a public issue.
 
+## Contributing support for another voivodeship
+
+Support for other Polish voivodeships is welcome. Immigration offices do not necessarily use the same portal, authentication flow, case identifier, status terminology, URL structure, or geographic restrictions, so support for a new office should be based on the **actual live portal used by that voivodeship**, not assumptions copied from Przybysz.
+
+The existing implementation is the reference implementation for **Dolnośląskie / Przybysz**. Portal-specific browser logic currently lives primarily in `src/monitor.mjs`; the GitHub Actions orchestration is in `.github/workflows/monitor.yml`, and the current European-connectivity fallback is implemented under `scripts/`.
+
+### Before writing code
+
+1. Find the **official case-status website** linked by the relevant voivodeship office.
+2. Determine whether it requires authentication and what credentials the user must provide.
+3. Determine how a case can be identified after login: case/application number, submission or acceptance date, another stable identifier, or a combination.
+4. Identify the **explicit status field** shown by the portal. Do not monitor an entire page or arbitrary surrounding text if a specific status value exists.
+5. Check whether the website is geographically restricted. Do not assume the European-egress workaround used by Przybysz is required for every portal.
+6. Test only with an account/case you are authorized to access.
+
+### Preferred implementation approach
+
+Please keep new portal support isolated from the existing Przybysz path instead of adding many voivodeship-specific `if` statements throughout `src/monitor.mjs`.
+
+A contribution should preferably introduce a small portal adapter/module with a clear responsibility boundary, for example:
+
+```text
+portal id / voivodeship
+        ↓
+base URL
+        ↓
+login/authentication
+        ↓
+open or locate configured case
+        ↓
+verify correct case
+        ↓
+extract one explicit status value
+```
+
+The generic monitoring layer should continue to handle normalization, fingerprinting, baseline comparison, result persistence, and notification semantics. A portal adapter should be responsible only for the website-specific navigation and extraction needed to return a verified status value.
+
+If the new portal needs different secrets, document them clearly and make them portal-specific where possible. Avoid changing the meaning of existing `PIO_*` secrets for Przybysz users.
+
+### Safety and correctness requirements
+
+A new portal implementation should preserve these invariants:
+
+- **Never commit or log credentials.**
+- **Never print the readable case status** in public Actions logs by default.
+- Do not upload authenticated HTML or screenshots as public artifacts.
+- Positively identify the intended case before reading its status.
+- If an identifier such as a date matches multiple cases, **fail rather than guess**.
+- Extract an explicit status/stage field whenever the portal exposes one.
+- If the expected DOM/status field cannot be found, **fail closed** instead of fingerprinting arbitrary nearby text.
+- Store only the normalized status fingerprint in the Actions cache, not the readable status or case page.
+- A verified status change may trigger the intentional **Status changed** failure/notification behavior.
+- Connectivity or relay availability alone must **not** be interpreted as a case-status change.
+- Keep normal HTTPS certificate validation enabled.
+
+### Testing a new portal
+
+Before opening a pull request, verify at least these cases against the real portal:
+
+1. **Authentication succeeds** with valid test credentials.
+2. **Wrong credentials fail clearly** without leaking them.
+3. The configured case is selected exactly.
+4. Ambiguous case identification is rejected rather than guessed.
+5. The actual explicit status field is extracted.
+6. A first run creates a baseline.
+7. A second run with the same status reports `unchanged`.
+8. A deliberately different test/expected status is detected as different.
+9. Temporary connectivity failure does not overwrite the previous baseline.
+10. Logs and artifacts contain no readable credentials, case identifiers, or authenticated page contents.
+
+If practical, include a portal-specific equivalent of the temporary `PIO_EXPECTED_STATUS` verification so a contributor can prove that the scraper extracted the same literal status visible in the browser without printing that status publicly.
+
+### What to include in the pull request
+
+Please include:
+
+- the **voivodeship and office name**;
+- the official portal URL;
+- a short explanation of the login and case-selection flow;
+- the name/meaning of the status field being monitored;
+- whether geographic routing is required;
+- all new secrets/configuration variables;
+- evidence that baseline → unchanged comparison works;
+- evidence that the implementation fails safely when the portal structure is not recognized;
+- README setup instructions for users of that portal.
+
+You may include **sanitized DOM snippets** if they help explain selectors, but remove names, case numbers, dates used as private identifiers, addresses, PESEL/passport information, tokens, cookies, and any other personal data. Do not attach authenticated screenshots containing personal information to a public issue or pull request.
+
+If you are not comfortable implementing the scraper yourself, you can still help by opening an issue with the voivodeship name and the **public official portal URL**. Do not post credentials or authenticated case data; maintainers can then determine what additional information is safe and necessary.
+
 ## Schedule
 
 The default schedule is:
